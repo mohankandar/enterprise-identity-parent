@@ -1,4 +1,4 @@
-# Enterprise Identity 0.1.0
+# Enterprise Identity 0.2.1
 
 Shared, product-neutral identity foundation for LexaVault and SDV.
 
@@ -16,3 +16,9 @@ secret storage.
 
 Adds product-neutral provider lifecycle types, a secret-free `OidcConnectionBinding`, a fail-closed resolver contract,
 and a bounded TTL caching resolver. Persistence and product authorization remain product-owned.
+
+## 0.2.1 — Null-safe audience validation
+
+`RequiredAudienceValidator` no longer throws when a token has no `aud` claim. It now returns the normal
+"Required API audience is missing." failure, so the resource server answers 401 instead of 500. Adds the first unit
+tests for the validator.
