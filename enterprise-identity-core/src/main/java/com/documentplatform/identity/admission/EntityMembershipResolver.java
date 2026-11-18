@@ -8,6 +8,7 @@ import java.util.Set;
 
 import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.CONTEXT_UNAVAILABLE;
 import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.POLICY_UNAVAILABLE;
+import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.UNKNOWN_ROLE;
 
 /**
  * Finds the entities a verified identity may enter, and its roles in each: an entity is admitted only when it has
@@ -15,8 +16,14 @@ import static com.documentplatform.identity.admission.IdentityAdmissionException
  * Roles in one entity never come from another entity's grants.
  *
  * <p>The caller must pass the issuer and the groups from a cryptographically verified token, never from the request.
+ *
+ * <p>A matched grant that names a role the product does not know refuses only the entity it belongs to: the
+ * identity's other entities are still admitted, and the fault is logged as an error. A grant of the platform role,
+ * or any other invalid policy, still refuses the whole sign-in.
  */
 public final class EntityMembershipResolver {
+
+    private static final System.Logger LOG = System.getLogger(EntityMembershipResolver.class.getName());
 
     private final EntityGroupGrants grants;
     private final ActiveEntityCandidates candidates;
@@ -51,7 +58,14 @@ public final class EntityMembershipResolver {
             if (!activeCandidates.contains(entity)) continue;
             // Absence of a matching group means no membership. An invalid policy is a hard failure.
             if (authorization.hasMatchingGroup(authenticatedGroups, policies.get(entity))) {
-                authorized.put(entity, authorization.authorizedRoles(entity, authenticatedGroups, policies));
+                try {
+                    authorized.put(entity, authorization.authorizedRoles(entity, authenticatedGroups, policies));
+                } catch (IdentityAdmissionException refused) {
+                    if (refused.reason() != UNKNOWN_ROLE) throw refused;
+                    LOG.log(System.Logger.Level.ERROR,
+                            "Entity {0} is refused for this sign-in: a matched group grant names a role the product "
+                                    + "does not know. Correct the entity''s grants.", entity);
+                }
             }
         }
         return Map.copyOf(authorized);
