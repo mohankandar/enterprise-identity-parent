@@ -14,10 +14,10 @@ import static com.documentplatform.identity.admission.IdentityAdmissionException
 public final class TrustedEntityAdmission {
 
     public EntityId requireAuthorized(EntityId requestedEntity, Set<EntityId> trustedMemberships) {
-        Objects.requireNonNull(requestedEntity, "requestedTenant");
+        Objects.requireNonNull(requestedEntity, "requestedEntity");
         if (trustedMemberships == null || !trustedMemberships.contains(requestedEntity)) {
             throw new IdentityAdmissionException(NOT_AUTHORIZED_FOR_ENTITY,
-                    "Authenticated identity is not authorized for the requested tenant");
+                    "The verified identity may not enter the requested entity");
         }
         return requestedEntity;
     }
@@ -25,7 +25,7 @@ public final class TrustedEntityAdmission {
     /** Selects an entity only when exactly one is authorized; otherwise an explicit, verified choice is required. */
     public EntityId requireUnambiguous(Set<EntityId> trustedMemberships) {
         if (trustedMemberships == null || trustedMemberships.size() != 1) {
-            throw new IdentityAdmissionException(AMBIGUOUS_SELECTION, "A unique authorized tenant context is required");
+            throw new IdentityAdmissionException(AMBIGUOUS_SELECTION, "More than one entity is admissible and none was chosen");
         }
         return trustedMemberships.iterator().next();
     }

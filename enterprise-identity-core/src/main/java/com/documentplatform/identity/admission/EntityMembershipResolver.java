@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.CONTEXT_UNAVAILABLE;
 import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.POLICY_UNAVAILABLE;
 
 /**
@@ -35,14 +36,14 @@ public final class EntityMembershipResolver {
 
     public Map<EntityId, Set<String>> authorizedEntities(URI verifiedIssuer, Object authenticatedGroups) {
         if (verifiedIssuer == null || audience == null || audience.isBlank()) {
-            throw new IdentityAdmissionException(POLICY_UNAVAILABLE, "Verified OIDC tenant membership context is unavailable");
+            throw new IdentityAdmissionException(CONTEXT_UNAVAILABLE, "No verified issuer, or no audience configured");
         }
         ConnectionKey key = new ConnectionKey(providerId, verifiedIssuer, audience);
         Map<EntityId, Map<String, Set<String>>> policies = grants.activeGrants(key);
         Set<EntityId> activeCandidates = candidates.find(key);
         if (policies == null || activeCandidates == null) {
             throw new IdentityAdmissionException(POLICY_UNAVAILABLE,
-                    "OIDC tenant admission policy or ACTIVE tenant bindings are unavailable");
+                    "The grants or the ACTIVE entities could not be read");
         }
         // Only an entity backed by both an ACTIVE connection and a matching verified group is admissible.
         Map<EntityId, Set<String>> authorized = new LinkedHashMap<>();

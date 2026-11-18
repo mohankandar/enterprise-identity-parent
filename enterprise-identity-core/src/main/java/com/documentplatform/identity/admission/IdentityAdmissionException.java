@@ -14,8 +14,10 @@ public final class IdentityAdmissionException extends RuntimeException {
     public enum Reason {
         /** Shared-issuer selection is switched off, or connections are not persisted. */
         NOT_ENABLED,
-        /** The verified identity has no admissible entity, or verified membership is not backed by an ACTIVE connection. */
+        /** The verified identity has no admissible entity. */
         NO_VERIFIED_MEMBERSHIP,
+        /** A verified membership is not backed by an ACTIVE connection. */
+        MEMBERSHIP_NOT_BACKED,
         /** More than one entity is admissible and none was chosen. */
         AMBIGUOUS_SELECTION,
         /** The chosen entity is not one the verified identity may enter. */
@@ -24,11 +26,19 @@ public final class IdentityAdmissionException extends RuntimeException {
         INVALID_SELECTION,
         /** The identity matched an entity's groups but no role resulted. */
         NO_ROLE_FOR_ENTITY,
-        /** A grant names a role the product does not know, or a grant is empty. */
+        /** A grant names a role the product does not know. */
+        UNKNOWN_ROLE,
+        /** A membership carries no role, or the platform role (checked by {@link SharedIssuerPreflight}). */
         INVALID_ROLE_GRANT,
         /** A grant gives the product's platform role through an entity group. */
         PLATFORM_ROLE_IN_ENTITY_GRANT,
-        /** The admission policy or the ACTIVE bindings could not be read, or the groups claim is not a collection. */
+        /** The verified groups claim is not a list. */
+        GROUPS_NOT_A_COLLECTION,
+        /** The entity has no group grants at all. */
+        NO_ADMISSION_POLICY,
+        /** There is no verified issuer, or no audience is configured. */
+        CONTEXT_UNAVAILABLE,
+        /** The grants or the ACTIVE entities could not be read from the product's store. */
         POLICY_UNAVAILABLE,
         /** A machine identity is bound to no entity, or to more than one. */
         MACHINE_BINDING_NOT_UNIQUE

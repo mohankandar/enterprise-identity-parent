@@ -6,10 +6,11 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
-import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.INVALID_ROLE_GRANT;
+import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.GROUPS_NOT_A_COLLECTION;
+import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.NO_ADMISSION_POLICY;
+import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.UNKNOWN_ROLE;
 import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.NO_ROLE_FOR_ENTITY;
 import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.PLATFORM_ROLE_IN_ENTITY_GRANT;
-import static com.documentplatform.identity.admission.IdentityAdmissionException.Reason.POLICY_UNAVAILABLE;
 
 /**
  * Turns verified login-system group memberships into roles for one entity, from that entity's grants only:
@@ -26,10 +27,10 @@ public final class EntityGroupAuthorization {
     /** No matching group is ordinary non-membership; an invalid policy is never suppressed. */
     public boolean hasMatchingGroup(Object signedGroups, Map<String, Set<String>> grants) {
         if (!(signedGroups instanceof Collection<?> groups)) {
-            throw new IdentityAdmissionException(POLICY_UNAVAILABLE, "Trusted IdP group collection is required");
+            throw new IdentityAdmissionException(GROUPS_NOT_A_COLLECTION, "The verified groups claim is not a list");
         }
         if (grants == null || grants.isEmpty()) {
-            throw new IdentityAdmissionException(POLICY_UNAVAILABLE, "Tenant has no trusted group admission policy");
+            throw new IdentityAdmissionException(NO_ADMISSION_POLICY, "The entity has no group grants");
         }
         for (Object candidate : groups) {
             if (candidate instanceof String group && grants.containsKey(group.trim())) return true;
@@ -39,13 +40,13 @@ public final class EntityGroupAuthorization {
 
     public Set<String> authorizedRoles(EntityId requestedEntity, Object signedGroups,
                                        Map<EntityId, Map<String, Set<String>>> mappings) {
-        Objects.requireNonNull(requestedEntity, "requestedTenant");
+        Objects.requireNonNull(requestedEntity, "requestedEntity");
         if (mappings == null || !mappings.containsKey(requestedEntity)) {
-            throw new IdentityAdmissionException(POLICY_UNAVAILABLE, "Tenant has no trusted group admission policy");
+            throw new IdentityAdmissionException(NO_ADMISSION_POLICY, "The entity has no group grants");
         }
         Map<String, Set<String>> grants = mappings.get(requestedEntity);
         if (grants == null || grants.isEmpty()) {
-            throw new IdentityAdmissionException(POLICY_UNAVAILABLE, "Tenant has no trusted group admission policy");
+            throw new IdentityAdmissionException(NO_ADMISSION_POLICY, "The entity has no group grants");
         }
         Set<String> external = new LinkedHashSet<>();
         if (signedGroups instanceof Collection<?> groups) {
@@ -53,7 +54,7 @@ public final class EntityGroupAuthorization {
                 if (group instanceof String value && !value.isBlank()) external.add(value.trim());
             }
         } else {
-            throw new IdentityAdmissionException(POLICY_UNAVAILABLE, "Trusted IdP group collection is required");
+            throw new IdentityAdmissionException(GROUPS_NOT_A_COLLECTION, "The verified groups claim is not a list");
         }
         Set<String> authorized = new LinkedHashSet<>();
         for (String group : external) {
@@ -61,17 +62,17 @@ public final class EntityGroupAuthorization {
             if (granted != null) {
                 for (String role : granted) {
                     String canonical = roles.canonicalEntityRole(role)
-                            .orElseThrow(() -> new IdentityAdmissionException(INVALID_ROLE_GRANT, "Invalid tenant role configuration"));
+                            .orElseThrow(() -> new IdentityAdmissionException(UNKNOWN_ROLE, "A grant names a role the product does not know"));
                     if (roles.isPlatformRole(canonical)) {
                         throw new IdentityAdmissionException(PLATFORM_ROLE_IN_ENTITY_GRANT,
-                                "Platform Operations cannot be granted through tenant IdP groups");
+                                "The product platform role cannot be granted through an entity group");
                     }
                     authorized.add(canonical);
                 }
             }
         }
         if (authorized.isEmpty()) {
-            throw new IdentityAdmissionException(NO_ROLE_FOR_ENTITY, "Authenticated identity has no tenant-authorized role");
+            throw new IdentityAdmissionException(NO_ROLE_FOR_ENTITY, "The verified identity has no role in this entity");
         }
         return Set.copyOf(authorized);
     }

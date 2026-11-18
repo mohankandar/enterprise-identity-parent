@@ -23,7 +23,7 @@ public final class EntitySelection {
         try {
             selected = EntityId.of(UUID.fromString(requestedEntity.trim()));
         } catch (IllegalArgumentException invalid) {
-            throw new IdentityAdmissionException(INVALID_SELECTION, "Invalid selected tenant identifier");
+            throw new IdentityAdmissionException(INVALID_SELECTION, "The entity choice is not a valid entity id");
         }
         return admission.requireAuthorized(selected, authorized);
     }

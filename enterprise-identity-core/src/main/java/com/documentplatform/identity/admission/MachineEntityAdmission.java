@@ -10,12 +10,12 @@ public final class MachineEntityAdmission {
     public EntityId requireUnique(Set<EntityId> candidates) {
         if (candidates == null || candidates.size() != 1) {
             throw new IdentityAdmissionException(MACHINE_BINDING_NOT_UNIQUE,
-                    "Machine identity has no unique ACTIVE tenant integration binding");
+                    "The machine identity is not bound to exactly one entity");
         }
         EntityId selected = candidates.iterator().next();
         if (selected == null) {
             throw new IdentityAdmissionException(MACHINE_BINDING_NOT_UNIQUE,
-                    "Machine identity has no unique ACTIVE tenant integration binding");
+                    "The machine identity is not bound to exactly one entity");
         }
         return selected;
     }
