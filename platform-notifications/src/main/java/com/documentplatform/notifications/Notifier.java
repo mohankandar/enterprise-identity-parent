@@ -8,6 +8,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -21,21 +22,29 @@ import static com.documentplatform.notifications.NotificationException.Reason.NO
 import static com.documentplatform.notifications.NotificationException.Reason.UNKNOWN_FIELD;
 
 /**
- * The entry point. Apps publish events and report conditions; the app's scheduler calls {@link #tick(Instant)}
- * regularly (every minute is enough) to raise condition alerts, send summaries that are due and retry messages that
- * failed for a temporary reason.
+ * The entry point. Apps publish events and report conditions. The app's scheduler calls {@link #tick(Instant)}
+ * regularly (every minute is enough) to raise condition alerts, put due summaries in the outbox and clear out old
+ * messages, and a background sender calls {@link #sendDue(Instant)} to deliver what is in the outbox. The Spring module
+ * {@code platform-notifications-spring} schedules both.
  *
  * <p>Routing, for each event: is the event type switched on for this tenant (technical) or entity (business)? →
  * which connected destinations does it go to? → for e-mail, which people hold its recipient roles (asked of the app's
- * {@link RecipientResolver} at send time)? Immediately events are sent at once; the others wait for their summary.
+ * {@link RecipientResolver} at send time)? Immediately events go into the outbox at once; the others wait for their
+ * summary.
+ *
+ * <p>{@link #publish}, {@link #conditionFailing} and {@link #conditionCleared} never wait on a channel: they only save
+ * to the outbox and wake the sender ({@link Builder#whenQueued(Runnable)}). Sending happens in
+ * {@link #sendDue(Instant)}, which does not hold the notifier's lock, so a slow mail server never holds up a publish.
  *
  * <p>Reliability: every message is saved in the {@link OutboxStore} before it is sent, under an idempotency key that
- * names what the message is. A restart loses nothing (saved messages are sent on the next tick) and re-creating a
+ * names what the message is. A restart loses nothing (saved messages are sent by the next sender run) and re-creating a
  * message gives the saved one, not a second. Temporary failures are retried with backoff ({@link RetryPolicy});
  * permanent ones stop at once and are reported. Summary buckets and condition state are stored too.
  *
  * <p>Logs ids, codes and fixed reasons only (to the {@code System.Logger} of this class), never message content,
- * addresses or secrets. Thread-safe: calls are serialised per instance; several instances may share the stores.
+ * addresses or secrets. Thread-safe: routing and housekeeping are serialised per instance, sending runs alongside them.
+ * Several instances (one per app instance) may share the stores. The {@link RecipientResolver} and the channels are
+ * called from the sending thread and must be thread-safe.
  */
 public final class Notifier {
 
@@ -53,6 +62,7 @@ public final class Notifier {
     private final Duration lease;
     private final Duration keepFinishedFor;
     private final int batchSize;
+    private final Runnable whenQueued;
 
     private Notifier(Builder b) {
         this.settings = Objects.requireNonNull(b.settings, "settings");
@@ -72,64 +82,118 @@ public final class Notifier {
         this.lease = b.lease;
         this.keepFinishedFor = b.keepFinishedFor;
         this.batchSize = b.batchSize;
+        this.whenQueued = b.whenQueued;
     }
 
     public static Builder builder(NotificationSettings settings, RecipientResolver recipients) {
         return new Builder(settings, recipients);
     }
 
-    /** Publishes a one-off event. Returns what happened for each destination. */
-    public synchronized List<DeliveryReport> publish(NotificationEvent event) {
+    /**
+     * Publishes a one-off event and returns at once. The event is saved in the outbox for each destination
+     * ({@link DeliveryStatus#PENDING}) or added to its summary ({@link DeliveryStatus#QUEUED_FOR_SUMMARY}). It never
+     * waits on a channel.
+     */
+    public List<DeliveryReport> publish(NotificationEvent event) {
         EventType type = check(event);
         if (type.continuous()) {
             throw new NotificationException(IS_A_CONDITION, "Continuous event types are reported as conditions");
         }
-        Instant now = now();
-        Instant at = event.occurredAt() == null ? now : event.occurredAt();
-        return route(new Occurrence(Keys.newEvent(), event, type, MessageKind.EVENT, at, null, 0), now);
+        List<Routed> routed;
+        synchronized (this) {
+            Instant now = now();
+            Instant at = event.occurredAt() == null ? now : event.occurredAt();
+            routed = route(new Occurrence(Keys.newEvent(), event, type, MessageKind.EVENT, at, null, 0), now);
+        }
+        return queued(routed);
     }
 
     /**
      * Reports that a continuous condition is failing (call it on every failure; repeats are counted, not alerted).
-     * The event's type, tenant, entity and identifier name the condition.
+     * The event's type, tenant, entity and identifier name the condition. A due alert is queued, never sent here.
      */
-    public synchronized List<DeliveryReport> conditionFailing(NotificationEvent event) {
+    public List<DeliveryReport> conditionFailing(NotificationEvent event) {
         EventType type = check(event);
         if (!type.continuous()) {
             throw new NotificationException(NOT_A_CONDITION, "Only continuous event types are reported as conditions");
         }
-        Instant now = now();
-        conditions.failing(event, now);
-        return raiseDueAlerts(now);
+        List<Routed> routed;
+        synchronized (this) {
+            Instant now = now();
+            conditions.failing(event, now);
+            routed = raiseDueAlerts(now);
+        }
+        return queued(routed);
     }
 
-    /** Reports that a condition has cleared. Sends Recovered once, and only if the condition had alerted. */
-    public synchronized List<DeliveryReport> conditionCleared(ConditionKey key) {
-        Instant now = now();
-        Optional<Occurrence> recovered = conditions.recovered(key, now);
-        if (recovered.isEmpty()) {
-            return List.of();
+    /**
+     * Reports that a condition has cleared. Queues Recovered once, and only if the condition had alerted. Never waits
+     * on a channel.
+     */
+    public List<DeliveryReport> conditionCleared(ConditionKey key) {
+        List<Routed> routed;
+        synchronized (this) {
+            Instant now = now();
+            Optional<Occurrence> recovered = conditions.recovered(key, now);
+            if (recovered.isEmpty()) {
+                return List.of();
+            }
+            routed = route(recovered.get(), now);
+            conditions.remove(key);
         }
-        List<DeliveryReport> reports = route(recovered.get(), now);
-        conditions.remove(key);
+        return queued(routed);
+    }
+
+    /**
+     * Raises due condition alerts, puts due summaries in the outbox and clears out finished messages older than the
+     * retention. Then it sends what is due ({@link #sendDue(Instant)}), including retries and messages a stopped
+     * process left behind. Called by the app's scheduler. Returns what happened to the messages it raised and sent.
+     */
+    public List<DeliveryReport> tick(Instant now) {
+        Instant at = now.truncatedTo(ChronoUnit.MILLIS);
+        List<Routed> raised = housekeeping(at);
+        Map<String, DeliveryReport> sent = attemptDue(at);
+        List<DeliveryReport> reports = new ArrayList<>();
+        for (Routed r : raised) {
+            DeliveryReport outcome = r.key() == null ? null : sent.remove(r.key());
+            reports.add(outcome == null ? r.report() : outcome);
+        }
+        reports.addAll(sent.values());
         return reports;
     }
 
     /**
-     * Raises due condition alerts, sends due summaries, retries due messages (including any a stopped process left
-     * behind) and clears out finished messages older than the retention. Called by the app's scheduler.
+     * The first half of {@link #tick(Instant)}: raises due condition alerts, puts due summaries in the outbox, clears
+     * out old messages and wakes the sender. Never sends, so a scheduler can run it on time while a slow channel holds
+     * up the sender.
      */
-    public synchronized List<DeliveryReport> tick(Instant now) {
-        now = now.truncatedTo(ChronoUnit.MILLIS);
-        List<DeliveryReport> reports = new ArrayList<>(raiseDueAlerts(now));
-        for (SummaryBuckets.Due due : buckets.due(now)) {
-            reports.addAll(sendSummary(due, now));
+    public List<DeliveryReport> queueDue(Instant now) {
+        return queued(housekeeping(now.truncatedTo(ChronoUnit.MILLIS)));
+    }
+
+    private synchronized List<Routed> housekeeping(Instant at) {
+        List<Routed> raised = new ArrayList<>(raiseDueAlerts(at));
+        for (SummaryBuckets.Due due : buckets.due(at)) {
+            raised.addAll(queueSummary(due, at));
         }
-        for (OutboxEntry entry : outbox.claimDue(now, now.plus(lease), batchSize)) {
-            reports.add(attempt(entry, now));
-        }
-        outbox.purgeFinishedBefore(now.minus(keepFinishedFor));
-        return reports;
+        outbox.purgeFinishedBefore(at.minus(keepFinishedFor));
+        return raised;
+    }
+
+    /**
+     * Sends up to {@link #batchSize()} due messages from the outbox: new ones, retries whose time has come, and any
+     * whose worker stopped (lapsed lease). Does not hold the notifier's lock, so publishing goes on meanwhile. Several
+     * senders, also in other app instances, may run at once: each message is claimed by one of them.
+     *
+     * @return one report per message attempted; as many as the batch size means more may be due
+     */
+    public List<DeliveryReport> sendDue(Instant now) {
+        return List.copyOf(attemptDue(now.truncatedTo(ChronoUnit.MILLIS)).values());
+    }
+
+    /** How many messages one {@link #sendDue(Instant)} attempts at most. */
+    public int batchSize() {
+        return batchSize;
     }
 
     /** Whether the condition is currently being tracked (started and not cleared). */
@@ -166,8 +230,28 @@ public final class Notifier {
         return settings.effective(event.tenant(), event.entity(), event.type()).conditionTiming();
     }
 
-    private List<DeliveryReport> raiseDueAlerts(Instant now) {
-        List<DeliveryReport> reports = new ArrayList<>();
+    private Map<String, DeliveryReport> attemptDue(Instant now) {
+        Map<String, DeliveryReport> reports = new LinkedHashMap<>();
+        for (OutboxEntry entry : outbox.claimDue(now, now.plus(lease), batchSize)) {
+            reports.put(entry.key(), attempt(entry, now));
+        }
+        return reports;
+    }
+
+    /** Wakes the sender if anything went into the outbox, and hands back the reports. */
+    private List<DeliveryReport> queued(List<Routed> routed) {
+        if (routed.stream().anyMatch(r -> r.key() != null)) {
+            try {
+                whenQueued.run();
+            } catch (RuntimeException ignored) {
+                // The message is saved; the sender's next regular run picks it up.
+            }
+        }
+        return routed.stream().map(Routed::report).toList();
+    }
+
+    private List<Routed> raiseDueAlerts(Instant now) {
+        List<Routed> reports = new ArrayList<>();
         for (ConditionTracker.Due due : conditions.due(now, this::timing)) {
             reports.addAll(route(due.occurrence(), now));
             conditions.markAlerted(due, now);
@@ -175,36 +259,38 @@ public final class Notifier {
         return reports;
     }
 
-    private List<DeliveryReport> route(Occurrence o, Instant now) {
+    private List<Routed> route(Occurrence o, Instant now) {
         NotificationEvent e = o.event();
         Set<EventTypeId> types = Set.of(e.type());
         EventSettings s = settings.effective(e.tenant(), e.entity(), e.type());
         if (!s.enabled()) {
-            return List.of(new DeliveryReport(e.tenant(), types, null, o.kind(), DeliveryStatus.DISABLED, null));
+            return List.of(Routed.of(new DeliveryReport(e.tenant(), types, null, o.kind(), DeliveryStatus.DISABLED,
+                    null)));
         }
         Optional<TenantSettings> tenant = settings.tenant(e.tenant());
         List<DestinationId> targets = tenant.map(t -> t.targetsFor(s.destinations())).orElse(List.of());
         if (targets.isEmpty()) {
-            return List.of(new DeliveryReport(e.tenant(), types, null, o.kind(), DeliveryStatus.NO_DESTINATION, null));
+            return List.of(Routed.of(new DeliveryReport(e.tenant(), types, null, o.kind(),
+                    DeliveryStatus.NO_DESTINATION, null)));
         }
         TenantSettings t = tenant.get();
-        List<DeliveryReport> reports = new ArrayList<>();
+        List<Routed> reports = new ArrayList<>();
         for (DestinationId destination : targets) {
             ChannelKind kind = t.kindOf(destination);
             Set<RoleId> roles = kind == ChannelKind.EMAIL ? s.recipientRoles() : Set.of();
             if (s.schedule().isSummary()) {
                 buckets.add(e.tenant(), destination, s.schedule(), e.entity(), roles, o, now, t.zone());
-                reports.add(new DeliveryReport(e.tenant(), types, destination, o.kind(),
-                        DeliveryStatus.QUEUED_FOR_SUMMARY, null));
+                reports.add(Routed.of(new DeliveryReport(e.tenant(), types, destination, o.kind(),
+                        DeliveryStatus.QUEUED_FOR_SUMMARY, null)));
             } else {
-                reports.add(enqueueAndSend(OutboxEntry.pending(Keys.forDestination(o.key(), destination), e.tenant(),
-                        destination, kind, e.entity(), roles, types, MessageBuilder.single(o, t), now), now));
+                reports.add(enqueue(OutboxEntry.pending(Keys.forDestination(o.key(), destination), e.tenant(),
+                        destination, kind, e.entity(), roles, types, MessageBuilder.single(o, t), now)));
             }
         }
         return reports;
     }
 
-    private List<DeliveryReport> sendSummary(SummaryBuckets.Due due, Instant now) {
+    private List<Routed> queueSummary(SummaryBuckets.Due due, Instant now) {
         SummaryBucket bucket = due.bucket();
         Set<EventTypeId> types = new LinkedHashSet<>();
         List<Occurrence> items = new ArrayList<>();
@@ -223,30 +309,26 @@ public final class Notifier {
         Optional<TenantSettings> tenant = settings.tenant(bucket.tenant());
         if (tenant.isEmpty() || !tenant.get().isConnected(bucket.destination())) {
             buckets.remove(due);
-            return List.of(failedReport(bucket.tenant(), types, bucket.destination(), null, MessageKind.SUMMARY,
-                    FailureCode.DESTINATION_NOT_CONNECTED, "summary dropped"));
+            return List.of(Routed.of(failedReport(bucket.tenant(), types, bucket.destination(), null,
+                    MessageKind.SUMMARY, FailureCode.DESTINATION_NOT_CONNECTED, "summary dropped")));
         }
         TenantSettings t = tenant.get();
         OutboxEntry entry = OutboxEntry.pending(Keys.summary(bucket), bucket.tenant(), bucket.destination(),
                 t.kindOf(bucket.destination()), bucket.entity(), bucket.roles(), types,
                 MessageBuilder.summary(items, t), now);
         // Saved first, then the bucket emptied: stopping in between rebuilds the same summary under the same key.
-        outbox.enqueue(entry);
+        Routed saved = enqueue(entry);
         buckets.remove(due);
-        return List.of(claimAndSend(entry, now));
+        return List.of(saved);
     }
 
-    private DeliveryReport enqueueAndSend(OutboxEntry entry, Instant now) {
-        outbox.enqueue(entry);
-        return claimAndSend(entry, now);
-    }
-
-    private DeliveryReport claimAndSend(OutboxEntry entry, Instant now) {
-        Optional<OutboxEntry> claimed = outbox.claim(entry.key(), now, now.plus(lease));
-        if (claimed.isPresent()) {
-            return attempt(claimed.get(), now);
+    /** Saves a message for the sender. Reports PENDING, or the saved state if the same message was saved before. */
+    private Routed enqueue(OutboxEntry entry) {
+        if (outbox.enqueue(entry)) {
+            return new Routed(entry.key(), new DeliveryReport(entry.tenant(), entry.eventTypes(), entry.destination(),
+                    entry.message().kind(), DeliveryStatus.PENDING, null));
         }
-        // Already saved before (re-created after a restart) and sent, given up, or in another worker's hands.
+        // Already saved before (re-created after a restart): sent, given up, waiting, or in a worker's hands.
         OutboxEntry saved = outbox.find(entry.key()).orElse(entry);
         DeliveryStatus status = switch (saved.state()) {
             case SENT -> DeliveryStatus.SENT;
@@ -255,8 +337,8 @@ public final class Notifier {
         };
         FailureCode code = status == DeliveryStatus.FAILED || status == DeliveryStatus.RETRY_SCHEDULED
                 ? saved.lastFailure() : null;
-        return new DeliveryReport(saved.tenant(), saved.eventTypes(), saved.destination(), saved.message().kind(),
-                status, code);
+        return new Routed(status == DeliveryStatus.PENDING ? saved.key() : null, new DeliveryReport(saved.tenant(),
+                saved.eventTypes(), saved.destination(), saved.message().kind(), status, code));
     }
 
     /** One attempt at a claimed message, and its outcome recorded in the outbox. */
@@ -328,6 +410,13 @@ public final class Notifier {
         }
     }
 
+    /** A report, and the outbox key when a message was saved and waits for the sender. */
+    private record Routed(String key, DeliveryReport report) {
+        static Routed of(DeliveryReport report) {
+            return new Routed(null, report);
+        }
+    }
+
     /** Wires a notifier. Settings, recipients and the three stores are required. */
     public static final class Builder {
         private final NotificationSettings settings;
@@ -341,6 +430,7 @@ public final class Notifier {
         private Duration lease = Duration.ofMinutes(5);
         private Duration keepFinishedFor = Duration.ofDays(30);
         private int batchSize = 100;
+        private Runnable whenQueued = () -> { };
 
         private Builder(NotificationSettings settings, RecipientResolver recipients) {
             this.settings = settings;
@@ -403,12 +493,21 @@ public final class Notifier {
             return this;
         }
 
-        /** Messages retried per tick (default 100). */
+        /** Messages sent per {@link Notifier#sendDue(Instant)} (default 100). */
         public Builder batchSize(int batchSize) {
             if (batchSize < 1) {
                 throw new IllegalArgumentException("Batch size must be positive");
             }
             this.batchSize = batchSize;
+            return this;
+        }
+
+        /**
+         * Called after a message was saved in the outbox, to wake the background sender so Immediately messages go
+         * out at once. Runs on the publishing thread: it must only signal, never send.
+         */
+        public Builder whenQueued(Runnable wake) {
+            this.whenQueued = Objects.requireNonNull(wake, "wake");
             return this;
         }
 

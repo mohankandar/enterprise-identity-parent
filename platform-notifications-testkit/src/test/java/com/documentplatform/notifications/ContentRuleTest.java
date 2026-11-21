@@ -80,9 +80,9 @@ class ContentRuleTest {
     void undeclaredOrMistypedFieldsAreRefused() {
         Fixture f = new Fixture();
         assertEquals(UNKNOWN_FIELD, assertThrows(NotificationException.class,
-                () -> f.notifier.publish(event(FILES_REJECTED).count("reason", 1).build())).reason());
+                () -> f.via(f.notifier).publish(event(FILES_REJECTED).count("reason", 1).build())).reason());
         assertEquals(UNKNOWN_FIELD, assertThrows(NotificationException.class,
-                () -> f.notifier.publish(event(FILES_REJECTED).time("files", Instant.EPOCH).build())).reason());
+                () -> f.via(f.notifier).publish(event(FILES_REJECTED).time("files", Instant.EPOCH).build())).reason());
         assertEquals(INVALID_VALUE, assertThrows(NotificationException.class,
                 () -> event(FILES_REJECTED).count("files", -1).build()).reason());
         assertEquals(INVALID_VALUE, assertThrows(NotificationException.class,
@@ -92,7 +92,7 @@ class ContentRuleTest {
     @Test
     void aMessageHoldsOnlyTheNameIdentifierFieldsAndLink() {
         Fixture f = new Fixture();
-        f.notifier.publish(event(APPROVAL_WAITING).entity(E1).identifier(RecordIdentifier.of("C-1001"))
+        f.via(f.notifier).publish(event(APPROVAL_WAITING).entity(E1).identifier(RecordIdentifier.of("C-1001"))
                 .time("due", Instant.parse("2026-11-21T09:00:00Z")).link(AppLink.of("/approvals/C-1001")).build());
         Message m = f.email.sent().get(0).message();
         assertEquals("""
@@ -108,7 +108,7 @@ class ContentRuleTest {
         f.settings.setTechnicalEvent(TENANT, FILES_REJECTED,
                 EventSettings.defaultsFor(f.settings.catalogue().require(FILES_REJECTED))
                         .withSchedule(Schedule.immediately()).withDestinations(TEAMS, Fixture.MAIL));
-        f.notifier.publish(event(FILES_REJECTED).identifier(RecordIdentifier.of("batch-7")).count("files", 3).build());
+        f.via(f.notifier).publish(event(FILES_REJECTED).identifier(RecordIdentifier.of("batch-7")).count("files", 3).build());
         String text = f.teams.sent().get(0).message().text() + f.email.sent().get(0).message().text();
         for (String forbidden : List.of(TEAMS.value(), Fixture.MAIL.value(), Fixture.BOB.emailAddress(),
                 Fixture.BOB.userId(), TENANT.value())) {

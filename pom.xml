@@ -14,11 +14,15 @@
         <module>platform-identity-spring</module>
         <module>platform-notifications</module>
         <module>platform-notifications-testkit</module>
+        <module>platform-notifications-spring</module>
     </modules>
     <properties>
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <spring.security.version>6.3.1</spring.security.version>
+        <!-- Compiled against the lowest Spring Boot line the products run (3.3.x; 3.5.x works too). The app's own Boot version wins. -->
+        <spring.boot.version>3.3.2</spring.boot.version>
+        <assertj.version>3.25.3</assertj.version>
         <junit.version>5.10.3</junit.version>
         <angus.mail.version>2.0.5</angus.mail.version>
         <greenmail.version>2.1.15</greenmail.version>

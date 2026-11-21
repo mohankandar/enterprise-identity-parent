@@ -64,7 +64,7 @@ class EndToEndContentRuleTest {
     void anEventReachesAllThreeChannelsWithOnlyItsAllowedContent() throws Exception {
         s.routeBusiness(E1, APPROVAL, MAIL, TEAMS, SLACK);
         Notifier n = s.notifier();
-        List<DeliveryReport> reports = n.publish(NotificationEvent.builder(APPROVAL, TENANT).entity(E1)
+        List<DeliveryReport> reports = s.publish(n, NotificationEvent.builder(APPROVAL, TENANT).entity(E1)
                 .identifier(RecordIdentifier.of("LN 12345")).time("due", Instant.parse("2026-11-21T09:00:00Z"))
                 .link(AppLink.of("/approvals/LN-12345")).build());
         assertEquals(List.of(DeliveryStatus.SENT, DeliveryStatus.SENT, DeliveryStatus.SENT),

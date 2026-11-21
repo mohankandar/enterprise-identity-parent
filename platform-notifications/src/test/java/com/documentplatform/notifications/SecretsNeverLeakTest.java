@@ -49,18 +49,18 @@ class SecretsNeverLeakTest {
             NotificationEvent event = NotificationEvent.builder(APPROVAL, TENANT).entity(E1)
                     .identifier(RecordIdentifier.of("LN 1")).build();
 
-            reports.addAll(n.publish(event)); // all three succeed: the password and both tokens are used
+            reports.addAll(s.publish(n, event)); // all three succeed: the password and both tokens are used
 
             s.secrets.put(Stack.MAIL_REF, WRONG_PASSWORD); // login refused
             s.hooks.then(Reply.of(404)).then(new Reply(429, Map.of("Retry-After", "60"), 0)); // Teams, then Slack
-            reports.addAll(n.publish(event));
+            reports.addAll(s.publish(n, event));
             s.hooks.always(Reply.of(401));
             reports.addAll(s.advance(n, Duration.ofMinutes(1))); // Slack retried, now refused
 
             s.secrets.put(Stack.TEAMS_REF, RETIRED);
             s.secrets.put(Stack.SLACK_REF, BAD_URL);
             s.hooks.reset();
-            reports.addAll(n.publish(event));
+            reports.addAll(s.publish(n, event));
 
             s.hooks.requests().forEach(r -> sentText.add(r.path() + " " + r.body()));
             for (var m : s.mail.getReceivedMessages()) {

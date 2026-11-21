@@ -31,7 +31,7 @@ class ConditionTrackerTest {
 
     @Test
     void noAlertBeforeTheThresholdThenOneAlert() {
-        assertTrue(f.notifier.conditionFailing(store("primary")).isEmpty());
+        assertTrue(f.via(f.notifier).conditionFailing(store("primary")).isEmpty());
         assertTrue(f.advance(Duration.ofMinutes(14)).isEmpty());
         List<DeliveryReport> reports = f.advance(Duration.ofMinutes(1));
         assertEquals(1, reports.size());
@@ -46,10 +46,10 @@ class ConditionTrackerTest {
 
     @Test
     void noDuplicateAlertsDuringAContinuousFailure() {
-        f.notifier.conditionFailing(store("primary"));
+        f.via(f.notifier).conditionFailing(store("primary"));
         for (int minute = 1; minute < 4 * 60; minute++) {
             f.clock.advance(Duration.ofMinutes(1));
-            f.notifier.conditionFailing(store("primary"));
+            f.via(f.notifier).conditionFailing(store("primary"));
             f.notifier.tick(f.clock.instant());
         }
         assertEquals(List.of(MessageKind.CONDITION_ALERT), sentKinds());
@@ -58,7 +58,7 @@ class ConditionTrackerTest {
 
     @Test
     void repeatsWhileItContinues() {
-        f.notifier.conditionFailing(store("primary"));
+        f.via(f.notifier).conditionFailing(store("primary"));
         f.advance(Duration.ofMinutes(15));
         f.advance(Duration.ofHours(3).plusMinutes(59));
         assertEquals(List.of(MessageKind.CONDITION_ALERT), sentKinds());
@@ -72,13 +72,13 @@ class ConditionTrackerTest {
 
     @Test
     void recoveredIsSentOnce() {
-        f.notifier.conditionFailing(store("primary"));
+        f.via(f.notifier).conditionFailing(store("primary"));
         f.advance(Duration.ofMinutes(20));
         f.clock.advance(Duration.ofMinutes(10));
         ConditionKey key = ConditionKey.of(store("primary"));
-        List<DeliveryReport> reports = f.notifier.conditionCleared(key);
+        List<DeliveryReport> reports = f.via(f.notifier).conditionCleared(key);
         assertEquals(MessageKind.RECOVERED, reports.get(0).kind());
-        assertTrue(f.notifier.conditionCleared(key).isEmpty());
+        assertTrue(f.via(f.notifier).conditionCleared(key).isEmpty());
         assertTrue(f.advance(Duration.ofHours(5)).isEmpty());
         assertEquals(List.of(MessageKind.CONDITION_ALERT, MessageKind.RECOVERED), sentKinds());
         assertEquals("""
@@ -92,19 +92,19 @@ class ConditionTrackerTest {
 
     @Test
     void clearedBeforeTheThresholdSendsNothing() {
-        f.notifier.conditionFailing(store("primary"));
+        f.via(f.notifier).conditionFailing(store("primary"));
         f.advance(Duration.ofMinutes(10));
-        assertTrue(f.notifier.conditionCleared(ConditionKey.of(store("primary"))).isEmpty());
+        assertTrue(f.via(f.notifier).conditionCleared(ConditionKey.of(store("primary"))).isEmpty());
         assertTrue(f.advance(Duration.ofHours(1)).isEmpty());
         assertTrue(f.email.sent().isEmpty());
     }
 
     @Test
     void afterRecoveryANewFailureStartsANewCondition() {
-        f.notifier.conditionFailing(store("primary"));
+        f.via(f.notifier).conditionFailing(store("primary"));
         f.advance(Duration.ofMinutes(15));
-        f.notifier.conditionCleared(ConditionKey.of(store("primary")));
-        f.notifier.conditionFailing(store("primary"));
+        f.via(f.notifier).conditionCleared(ConditionKey.of(store("primary")));
+        f.via(f.notifier).conditionFailing(store("primary"));
         assertTrue(f.advance(Duration.ofMinutes(14)).isEmpty());
         f.advance(Duration.ofMinutes(1));
         assertEquals(List.of(MessageKind.CONDITION_ALERT, MessageKind.RECOVERED, MessageKind.CONDITION_ALERT), sentKinds());
@@ -113,9 +113,9 @@ class ConditionTrackerTest {
 
     @Test
     void separateRecordsAreSeparateConditions() {
-        f.notifier.conditionFailing(store("primary"));
+        f.via(f.notifier).conditionFailing(store("primary"));
         f.clock.advance(Duration.ofMinutes(5));
-        f.notifier.conditionFailing(store("replica"));
+        f.via(f.notifier).conditionFailing(store("replica"));
         f.advance(Duration.ofMinutes(10));
         assertEquals(1, f.email.sent().size());
         f.advance(Duration.ofMinutes(5));
@@ -128,7 +128,7 @@ class ConditionTrackerTest {
         f.settings.setTechnicalEvent(TENANT, STORE_DOWN,
                 EventSettings.defaultsFor(f.settings.catalogue().require(STORE_DOWN))
                         .withConditionTiming(new ConditionTiming(Duration.ZERO, Duration.ofMinutes(30))));
-        List<DeliveryReport> reports = f.notifier.conditionFailing(store("primary"));
+        List<DeliveryReport> reports = f.via(f.notifier).conditionFailing(store("primary"));
         assertEquals(MessageKind.CONDITION_ALERT, reports.get(0).kind());
         f.advance(Duration.ofMinutes(30));
         assertEquals(2, f.email.sent().size());
@@ -136,7 +136,7 @@ class ConditionTrackerTest {
 
     @Test
     void typeDefaultThresholdIsUsed() {
-        f.notifier.conditionFailing(event(SOURCE_UNREACHABLE).identifier(RecordIdentifier.of("mail-1")).build());
+        f.via(f.notifier).conditionFailing(event(SOURCE_UNREACHABLE).identifier(RecordIdentifier.of("mail-1")).build());
         assertTrue(f.advance(Duration.ofMinutes(29)).isEmpty());
         assertEquals(1, f.advance(Duration.ofMinutes(1)).size());
         assertEquals(Set.of(BOB), f.email.sent().get(0).recipients());
@@ -144,11 +144,11 @@ class ConditionTrackerTest {
 
     @Test
     void hourlyCriticalConditionGoesIntoTheHourlySummary() {
-        f.notifier.conditionFailing(event(DELIVERY_FAILING).identifier(RecordIdentifier.of("target-1")).build());
+        f.via(f.notifier).conditionFailing(event(DELIVERY_FAILING).identifier(RecordIdentifier.of("target-1")).build());
         List<DeliveryReport> alert = f.advance(Duration.ofMinutes(15));
         assertEquals(DeliveryStatus.QUEUED_FOR_SUMMARY, alert.get(0).status());
         f.clock.advance(Duration.ofMinutes(5));
-        f.notifier.conditionCleared(ConditionKey.of(event(DELIVERY_FAILING).identifier(RecordIdentifier.of("target-1")).build()));
+        f.via(f.notifier).conditionCleared(ConditionKey.of(event(DELIVERY_FAILING).identifier(RecordIdentifier.of("target-1")).build()));
         f.advance(Duration.ofMinutes(35)); // 11:00
         assertEquals(1, f.email.sent().size());
         String text = f.email.sent().get(0).message().text();

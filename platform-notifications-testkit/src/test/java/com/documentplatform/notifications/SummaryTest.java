@@ -32,9 +32,9 @@ class SummaryTest {
 
     @Test
     void hourlyEventsWaitForTheNextWholeHourAndGoAsOneSummary() {
-        assertEquals(DeliveryStatus.QUEUED_FOR_SUMMARY, f.notifier.publish(rejected("b-1", 2)).get(0).status());
+        assertEquals(DeliveryStatus.QUEUED_FOR_SUMMARY, f.via(f.notifier).publish(rejected("b-1", 2)).get(0).status());
         f.clock.advance(Duration.ofMinutes(20));
-        f.notifier.publish(rejected("b-2", 3));
+        f.via(f.notifier).publish(rejected("b-2", 3));
         assertTrue(f.notifier.tick(Instant.parse("2026-11-20T10:59:59Z")).isEmpty());
         assertTrue(f.email.sent().isEmpty());
 
@@ -58,14 +58,14 @@ class SummaryTest {
 
     @Test
     void aSentSummaryIsNotSentAgainAndTheNextHoldsOnlyNewItems() {
-        f.notifier.publish(rejected("b-1", 1));
+        f.via(f.notifier).publish(rejected("b-1", 1));
         f.notifier.tick(Instant.parse("2026-11-20T11:00:00Z"));
         assertTrue(f.notifier.tick(Instant.parse("2026-11-20T12:00:00Z")).isEmpty());
         assertEquals(1, f.email.sent().size());
         assertEquals(0, f.notifier.pendingSummaryItems());
 
         f.clock.set(Instant.parse("2026-11-20T12:10:00Z"));
-        f.notifier.publish(rejected("b-2", 1));
+        f.via(f.notifier).publish(rejected("b-2", 1));
         f.notifier.tick(Instant.parse("2026-11-20T13:00:00Z"));
         String second = f.email.sent().get(1).message().text();
         assertTrue(second.contains("b-2") && !second.contains("b-1"), second);
@@ -73,8 +73,8 @@ class SummaryTest {
 
     @Test
     void every4HoursGoesAtTheNext4HourMarkPerEntity() {
-        f.notifier.publish(event(ITEMS_WAITING).entity(E1).identifier(RecordIdentifier.of("C-1")).count("items", 4).build());
-        f.notifier.publish(event(ITEMS_WAITING).entity(E2).identifier(RecordIdentifier.of("C-2")).count("items", 1).build());
+        f.via(f.notifier).publish(event(ITEMS_WAITING).entity(E1).identifier(RecordIdentifier.of("C-1")).count("items", 4).build());
+        f.via(f.notifier).publish(event(ITEMS_WAITING).entity(E2).identifier(RecordIdentifier.of("C-2")).count("items", 1).build());
         assertTrue(f.notifier.tick(Instant.parse("2026-11-20T11:00:00Z")).isEmpty());
         List<DeliveryReport> reports = f.notifier.tick(Instant.parse("2026-11-20T12:00:00Z"));
         // E1's reviewers get E1's summary; E2 has no reviewers
@@ -89,7 +89,7 @@ class SummaryTest {
     @Test
     void dailySummaryGoesAtTheChosenTimeInTheTenantsZone() {
         Fixture amsterdam = new Fixture(ZoneId.of("Europe/Amsterdam"));
-        amsterdam.notifier.publish(event(QUOTA).entity(E1).count("percent", 85).build());
+        amsterdam.via(amsterdam.notifier).publish(event(QUOTA).entity(E1).count("percent", 85).build());
         assertTrue(amsterdam.notifier.tick(Instant.parse("2026-11-21T06:59:00Z")).isEmpty());
         assertEquals(DeliveryStatus.SENT,
                 amsterdam.notifier.tick(Instant.parse("2026-11-21T07:00:00Z")).get(0).status());
@@ -101,7 +101,7 @@ class SummaryTest {
         f.settings.setTechnicalEvent(TENANT, FILES_REJECTED,
                 EventSettings.defaultsFor(f.settings.catalogue().require(FILES_REJECTED))
                         .withDestinations(TEAMS, Fixture.MAIL));
-        f.notifier.publish(rejected("b-1", 1));
+        f.via(f.notifier).publish(rejected("b-1", 1));
         assertEquals(2, f.notifier.tick(Instant.parse("2026-11-20T11:00:00Z")).size());
         assertEquals(1, f.teams.sent().size());
         assertEquals(1, f.email.sent().size());
@@ -110,7 +110,7 @@ class SummaryTest {
     @Test
     void longSummariesListTenItemsPerTypeAndCountTheRest() {
         for (int i = 1; i <= 13; i++) {
-            f.notifier.publish(rejected("b-" + i, 1));
+            f.via(f.notifier).publish(rejected("b-" + i, 1));
         }
         f.notifier.tick(Instant.parse("2026-11-20T11:00:00Z"));
         String text = f.email.sent().get(0).message().text();

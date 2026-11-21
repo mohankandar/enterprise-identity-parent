@@ -37,7 +37,7 @@ public final class InMemoryOutboxStore implements OutboxStore {
     @Override
     public synchronized List<OutboxEntry> claimDue(Instant now, Instant leaseUntil, int limit) {
         List<OutboxEntry> due = entries.values().stream().filter(e -> due(e, now))
-                .sorted(Comparator.comparing(OutboxEntry::nextAttemptAt).thenComparing(OutboxEntry::key))
+                .sorted(Comparator.comparing(OutboxEntry::nextAttemptAt)) // stable: saved order among equals
                 .limit(limit).toList();
         List<OutboxEntry> claimed = new ArrayList<>();
         due.forEach(e -> claimed.add(claim(e, leaseUntil)));

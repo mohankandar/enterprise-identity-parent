@@ -7,6 +7,7 @@ import com.documentplatform.notifications.DestinationId;
 import com.documentplatform.notifications.EntityId;
 import com.documentplatform.notifications.EventSettings;
 import com.documentplatform.notifications.EventTypeId;
+import com.documentplatform.notifications.NotificationEvent;
 import com.documentplatform.notifications.NotificationSettings;
 import com.documentplatform.notifications.Notifier;
 import com.documentplatform.notifications.OutboxStore;
@@ -106,6 +107,16 @@ public final class Stack implements AutoCloseable {
     public List<DeliveryReport> advance(Notifier n, Duration by) {
         clock.advance(by);
         return n.tick(clock.instant());
+    }
+
+    /** Publishes, then runs the sender once (as the background sender does at once), and reports the outcome. */
+    public List<DeliveryReport> publish(Notifier n, NotificationEvent event) {
+        return SendNow.delivered(n, clock.instant(), n.publish(event));
+    }
+
+    /** Runs the sender once after a call that queued messages. */
+    public List<DeliveryReport> delivered(Notifier n, List<DeliveryReport> queued) {
+        return SendNow.delivered(n, clock.instant(), queued);
     }
 
     public void routeTechnical(EventTypeId type, Schedule schedule, DestinationId... destinations) {

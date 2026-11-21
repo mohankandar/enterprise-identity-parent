@@ -33,7 +33,7 @@ Listed so the model covers them. Kind: B = business, T = technical, C = critical
 
 - **P003 — core logic, no I/O:** event-type model and catalogue registration with validation (critical frequency rule, defaults); settings model (tenant-level channels; per-entity business settings; tenant-level technical settings; thresholds); the publish API (structured fields only, no free text); routing (event → enabled? → which channels → which roles); summary buckets for hourly / 4-hourly / daily; continuous-condition tracker (start, threshold, repeat, recovered); message building that obeys the content rule; a `Clock` and a `tick(now)` entry point so apps schedule it and tests control time; channel and recipient-resolver **interfaces** with in-memory fakes. Full unit tests.
 - **P004 — real channels and storage:** SMTP email, Teams and Slack webhook senders with retries and specific failure reasons; an outbox so a crash or restart loses nothing and nothing is sent twice; storage behind interfaces with a Postgres implementation and SQL migration files the apps run in their own schema step; webhook URLs and mail passwords read from the secret store, never logged.
-- **P005 — Spring wiring:** auto-configuration, scheduling of `tick`, configuration properties (mail server and webhook addresses come from the install config file).
+- **P005 — Spring wiring:** module `platform-notifications-spring`: auto-configuration, scheduling of `tick` and of the background sender, configuration properties (mail server and webhook secret references come from the install config file), the startup check of the `notif_` tables, a health indicator per destination. Install guide: `docs/install/notifications.md`.
 - **Later, in each app:** the admin settings screens, the app's catalogue registration and the recipient resolver (role → people), when that app switches to platform-core.
 
 ## 5. Decisions
@@ -67,11 +67,58 @@ Listed so the model covers them. Kind: B = business, T = technical, C = critical
 9. **Identifier and link shapes.** Identifier: at most 64 characters of `A–Z a–z 0–9 . _ : / # -`, with single spaces
    inside (O4), no `//`. Link: a path only, no query string or fragment; the host comes from the tenant's app
    address. The real protection is that the publish API has no free-text field.
-10. **"Immediately" is sent inside `publish`.** Since P004 every message goes through the outbox first and temporary
-    failures are retried; the attempt is still made inside `publish`.
+10. **"Immediately" goes to the outbox at once.** Replaced by P004 answer A3: `publish` only saves to the outbox and
+    a background sender sends Immediately messages at once. `publish` never waits on a channel.
 11. **Own `TenantId` and `EntityId` types**, so the module does not depend on identity-core.
 12. **Numeric thresholds** are declared per event type with a default and a range, adjustable by the admin within the
     range, and read by the app with `NotificationSettings.threshold(...)`. The module does not compare them itself.
 
-Decisions made in P004 (channels, outbox, storage) are listed in `docs/work/P004-report.md` and await the owner's
-review before they are copied here.
+### Owner answers to the P004 questions (2026-11-20)
+
+- **A1. The at-least-once window is accepted** (P004 decision 3): a rare duplicate is better than a lost alert.
+- **A2. OAuth 2.0 for Microsoft 365 / Google mail:** not answered yet; still open.
+- **A3. `publish` only saves to the outbox.** A background worker sends Immediately messages at once. `publish` must
+  never wait on a channel.
+- **A4. Retry defaults accepted** (P004 decision 4), and they are configuration properties.
+- **A5. No authenticating proxy for now.** The plain JVM proxy settings are enough.
+
+### Database rule (owner, fixed for both products, 2026-11-20)
+
+- **D1. Database setup is a separate schema step the customer runs.** App startup never creates tables or inserts
+  rows. The `notif_` SQL files (`db/platform/notifications`) are run only by the app's schema step; they are
+  documented, not executed at startup.
+- **D2. At startup the app checks** that the `notif_` tables exist at the expected version (table
+  `notif_schema_version`) and that its database user may use them. If not, it stops with a specific message, for
+  example "Notifications tables at version 0, expected version 1: run the schema step …". No generic errors.
+- **D3. At runtime the app's database user needs only SELECT, INSERT, UPDATE and DELETE** on the `notif_` tables
+  (SELECT on `notif_schema_version`), no DDL.
+
+### Decisions made in P004, as confirmed or changed by the answers above
+
+1. **The P003 tests live in the testkit module**, with the fakes they use: the main module's tests cannot depend on
+   the testkit (a Maven cycle). The main module has the I/O tests.
+2. **Idempotency keys name what the message is**, not when it was made: an event id and destination; a condition's
+   start and alert number; a summary bucket and its due time. A due bucket takes no new items, so rebuilding it gives
+   the same message. Times are kept in whole milliseconds, so keys survive the database round trip.
+3. **At least once, in one window:** the receiver took the message and the process stopped before the outbox recorded
+   it. After the lease the message goes again under the same key (e-mail keeps its `Message-ID`). Every other crash
+   point sends exactly once. Accepted (A1).
+4. **Retry policy:** first retry after 1 minute, doubling up to 30 minutes, given up after 24 hours; a receiver's
+   `Retry-After` replaces the backoff for that attempt. 5-minute lease, up to 100 messages per send round, finished
+   messages kept 30 days. Accepted (A4); all are `platform.notifications.*` properties since P005.
+5. **Which failures are retried:** temporary ones (unreachable, timeout, 4xx mail reply, 429, 5xx, secret store down,
+   recipient lookup down, unexpected sender fault). A TLS failure is permanent: a certificate or configuration problem
+   does not fix itself.
+6. **One refused recipient:** the others still get the message; the refusal is reported and not retried.
+7. **Recipients are looked up again on every attempt.** The outbox stores roles, never e-mail addresses.
+8. **Mail server and webhook settings come from the install config**, not the database. The database keeps only
+   destination ids and their channel. Since P005 one mail server serves every e-mail destination.
+9. **https only for webhooks**, no redirects followed, JVM proxy settings used. Plain http only for the module's own
+   tests. No authenticating proxy (A5).
+10. **Logging through `System.Logger`**, ids, codes and fixed reasons only. Jakarta Mail's debug output is off.
+11. **Plain-text e-mail only**; Slack uses plain-text blocks only, so nothing in a message is read as formatting.
+12. **A summary whose event types were all removed** from the catalogue in a later release is dropped silently.
+13. **`WEBHOOK_REJECTED` reads "… refused the webhook request (not authorised)"**, matching 401/403.
+
+Decisions made in P005 (Spring wiring) are listed in `docs/work/P005-report.md` and await the owner's review before
+they are copied here.

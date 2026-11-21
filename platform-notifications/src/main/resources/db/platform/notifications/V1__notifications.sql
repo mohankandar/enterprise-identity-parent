@@ -8,6 +8,18 @@
 -- name, record identifier, counts, times, link into the app). What is never stored: document content, redacted values,
 -- e-mail addresses (recipients are kept as roles and looked up at send time) and secrets (mail passwords and webhook
 -- addresses stay in the secret store; destinations are referenced by id).
+--
+-- This is the only place the notif_ tables are created or changed. The app never runs DDL at startup: it checks
+-- notif_schema_version and stops with a specific message if the tables are missing or at another version. At runtime
+-- the app's database user needs only SELECT, INSERT, UPDATE and DELETE on the notif_ tables.
+
+-- Which version of these files was run. One row; a later file updates it.
+create table notif_schema_version (
+    version      integer     primary key,
+    installed_at timestamptz not null default now()
+);
+
+insert into notif_schema_version (version) values (1);
 
 -- Channels the IT Admin connected for a tenant (TenantSettings).
 create table notif_tenant (
@@ -49,6 +61,7 @@ create table notif_event_settings (
 -- Outbox: every outgoing message, saved before it is sent. message_key is the idempotency key.
 create table notif_outbox (
     message_key     text        primary key,
+    seq             bigint      generated always as identity, -- first in, first out among messages due together
     tenant_id       text        not null,
     destination_id  text        not null,
     channel         text        not null check (channel in ('EMAIL', 'TEAMS', 'SLACK')),

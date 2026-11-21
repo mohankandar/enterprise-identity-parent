@@ -115,6 +115,46 @@ final class Fixture {
         return notifier.tick(clock.instant());
     }
 
+    /** Calls on {@code n} followed by one run of the sender, as the background sender does at once. */
+    Via via(Notifier n) {
+        return new Via(n);
+    }
+
+    final class Via {
+        private final Notifier n;
+
+        private Via(Notifier n) {
+            this.n = n;
+        }
+
+        List<DeliveryReport> publish(NotificationEvent e) {
+            return delivered(n.publish(e));
+        }
+
+        List<DeliveryReport> conditionFailing(NotificationEvent e) {
+            return delivered(n.conditionFailing(e));
+        }
+
+        List<DeliveryReport> conditionCleared(ConditionKey key) {
+            return delivered(n.conditionCleared(key));
+        }
+
+        /** Each PENDING report replaced by the outcome of its attempt. */
+        private List<DeliveryReport> delivered(List<DeliveryReport> queued) {
+            List<DeliveryReport> attempted = new java.util.ArrayList<>(n.sendDue(clock.instant()));
+            List<DeliveryReport> out = new java.util.ArrayList<>();
+            for (DeliveryReport r : queued) {
+                java.util.Optional<DeliveryReport> outcome = r.status() != DeliveryStatus.PENDING
+                        ? java.util.Optional.empty()
+                        : attempted.stream().filter(a -> java.util.Objects.equals(a.destination(), r.destination())
+                        && a.eventTypes().equals(r.eventTypes()) && a.kind() == r.kind()).findFirst();
+                outcome.ifPresent(attempted::remove);
+                out.add(outcome.orElse(r));
+            }
+            return out;
+        }
+    }
+
     static NotificationEvent.Builder event(EventTypeId type) {
         return NotificationEvent.builder(type, TENANT);
     }

@@ -62,7 +62,8 @@ class ReliabilityTest {
         s.routeBusiness(E1, APPROVAL, TEAMS);
         Channel diesBeforeSending = new CrashingChannel(s.teams, true, false);
         Notifier before = s.notifier(s.summaries, s.conditions, List.of(diesBeforeSending));
-        assertThrows(ProcessStopped.class, () -> before.publish(approval("LN 1")));
+        before.publish(approval("LN 1")); // saved; the sender dies while sending
+        assertThrows(ProcessStopped.class, () -> before.sendDue(s.clock.instant()));
         assertTrue(s.hooks.requests().isEmpty());
 
         Notifier after = s.notifier();
@@ -98,7 +99,7 @@ class ReliabilityTest {
     }
 
     @Test
-    void aCrashAfterAnAlertWentOutAndBeforeItWasRecordedAlertsOnce() {
+    void aCrashAfterAnAlertWasSavedAndBeforeItWasRecordedAlertsOnce() {
         s.routeTechnical(STORE_DOWN, Schedule.immediately(), TEAMS);
         NotificationEvent down = NotificationEvent.builder(STORE_DOWN, TENANT).identifier(RecordIdentifier.of("store-1"))
                 .build();
@@ -107,20 +108,20 @@ class ReliabilityTest {
         crashing.conditionFailing(down);
         s.clock.advance(Duration.ofMinutes(15));
         assertThrows(ProcessStopped.class, () -> crashing.tick(s.clock.instant()));
-        assertEquals(1, s.hooks.requests().size(), "the alert went out before the crash");
+        assertTrue(s.hooks.requests().isEmpty(), "the alert was saved in the outbox before the crash");
 
         Notifier restarted = s.notifier();
         List<DeliveryReport> again = restarted.tick(s.clock.instant());
         assertEquals(List.of(DeliveryStatus.SENT), again.stream().map(DeliveryReport::status).toList(),
-                "re-raised under the same key and found already sent");
+                "re-raised under the same key, found already saved, and sent");
         assertEquals(1, s.hooks.requests().size(), "no duplicate alert");
 
         assertTrue(s.advance(restarted, Duration.ofHours(3)).isEmpty());
         s.advance(restarted, Duration.ofHours(1));
         assertEquals(2, s.hooks.requests().size(), "the 4-hour repeat");
         assertTrue(s.hooks.requests().get(1).body().contains("Still ongoing: Store down: store-1"));
-        restarted.conditionCleared(ConditionKey.of(down));
-        restarted.conditionCleared(ConditionKey.of(down));
+        s.delivered(restarted, restarted.conditionCleared(ConditionKey.of(down)));
+        s.delivered(restarted, restarted.conditionCleared(ConditionKey.of(down)));
         assertEquals(3, s.hooks.requests().size(), "Recovered once");
         assertTrue(s.hooks.requests().get(2).body().contains("Recovered: Store down: store-1"));
     }
@@ -149,7 +150,8 @@ class ReliabilityTest {
         // the outbox recorded it. The message goes again after the lease, with the same Message-ID.
         Channel diesAfterSending = new CrashingChannel(s.email, false, true);
         Notifier crashing = s.notifier(s.summaries, s.conditions, List.of(diesAfterSending));
-        assertThrows(ProcessStopped.class, () -> crashing.publish(approval("LN 2")));
+        crashing.publish(approval("LN 2"));
+        assertThrows(ProcessStopped.class, () -> crashing.sendDue(s.clock.instant()));
         assertEquals(1, s.mail.getReceivedMessages().length);
 
         Notifier restarted = s.notifier();
@@ -164,7 +166,7 @@ class ReliabilityTest {
         s.routeBusiness(E1, APPROVAL, TEAMS);
         s.hooks.then(Reply.of(503)).then(Reply.of(502));
         Notifier n = s.notifier();
-        DeliveryReport first = n.publish(approval("LN 3")).get(0);
+        DeliveryReport first = s.publish(n, approval("LN 3")).get(0);
         assertEquals(DeliveryStatus.RETRY_SCHEDULED, first.status());
         assertEquals(FailureCode.WEBHOOK_SERVER_ERROR, first.failure());
         assertEquals(DeliveryStatus.RETRY_SCHEDULED, s.advance(n, Duration.ofMinutes(1)).get(0).status());
@@ -178,7 +180,7 @@ class ReliabilityTest {
         s.routeBusiness(E1, APPROVAL, TEAMS);
         s.hooks.always(Reply.of(410));
         Notifier n = s.notifier();
-        DeliveryReport r = n.publish(approval("LN 4")).get(0);
+        DeliveryReport r = s.publish(n, approval("LN 4")).get(0);
         assertEquals(DeliveryStatus.FAILED, r.status());
         assertEquals(FailureCode.WEBHOOK_ADDRESS_INVALID, r.failure());
         for (int i = 0; i < 24; i++) {
@@ -191,7 +193,7 @@ class ReliabilityTest {
     void loginRefusedStopsAtOnce() {
         s.secrets.put(Stack.MAIL_REF, "Wrong-Pw-SECRET-77");
         Notifier n = s.notifier();
-        DeliveryReport r = n.publish(approval("LN 5")).get(0);
+        DeliveryReport r = s.publish(n, approval("LN 5")).get(0);
         assertEquals(DeliveryStatus.FAILED, r.status());
         assertEquals(FailureCode.MAIL_LOGIN_REFUSED, r.failure());
         assertTrue(s.advance(n, Duration.ofHours(2)).isEmpty());
@@ -203,7 +205,7 @@ class ReliabilityTest {
         s.hooks.then(new Reply(429, Map.of("Retry-After", "300"), 0));
         Notifier n = s.notifier();
         Instant published = s.clock.instant();
-        assertEquals(FailureCode.WEBHOOK_RATE_LIMITED, n.publish(approval("LN 6")).get(0).failure());
+        assertEquals(FailureCode.WEBHOOK_RATE_LIMITED, s.publish(n, approval("LN 6")).get(0).failure());
         assertTrue(s.advance(n, Duration.ofMinutes(4)).isEmpty(), "not after the usual 1 minute");
         assertEquals(DeliveryStatus.SENT, s.advance(n, Duration.ofMinutes(1)).get(0).status());
         assertEquals(2, s.hooks.requests().size());

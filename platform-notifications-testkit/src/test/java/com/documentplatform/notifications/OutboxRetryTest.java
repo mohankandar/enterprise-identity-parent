@@ -26,7 +26,7 @@ class OutboxRetryTest {
         f.settings.setTechnicalEvent(TENANT, FILES_REJECTED,
                 EventSettings.defaultsFor(f.settings.catalogue().require(FILES_REJECTED))
                         .withSchedule(Schedule.immediately()).withDestinations(TEAMS));
-        List<DeliveryReport> reports = f.notifier.publish(
+        List<DeliveryReport> reports = f.via(f.notifier).publish(
                 event(FILES_REJECTED).identifier(RecordIdentifier.of("batch-7")).count("files", 3).build());
         assertEquals(1, reports.size());
         return reports.get(0);
@@ -101,7 +101,7 @@ class OutboxRetryTest {
                 EventSettings.defaultsFor(f.settings.catalogue().require(FILES_REJECTED))
                         .withSchedule(Schedule.immediately()).withDestinations(TEAMS));
         f.teams.failWith(FailureCode.WEBHOOK_SERVER_ERROR);
-        n.publish(event(FILES_REJECTED).count("files", 1).build());
+        f.via(n).publish(event(FILES_REJECTED).count("files", 1).build());
         DeliveryReport last = null;
         for (int minute = 1; minute <= 30; minute++) {
             f.clock.advance(Duration.ofMinutes(1));
@@ -119,7 +119,7 @@ class OutboxRetryTest {
     @Test
     void recipientsAreLookedUpAgainOnEachAttempt() {
         f.email.failWith(FailureCode.MAIL_SERVER_UNREACHABLE);
-        f.notifier.publish(event(APPROVAL_WAITING).entity(E1).identifier(RecordIdentifier.of("C-1")).build());
+        f.via(f.notifier).publish(event(APPROVAL_WAITING).entity(E1).identifier(RecordIdentifier.of("C-1")).build());
         Recipient dee = new Recipient("u-dee", "dee@example.test");
         f.resolver.grant(TENANT, E1, Fixture.APPROVER, dee);
         f.email.succeed();
@@ -144,7 +144,7 @@ class OutboxRetryTest {
         };
         Notifier crashing = f.notifier(f.settings, f.resolver, List.of(dies));
         try {
-            crashing.publish(event(FILES_REJECTED).count("files", 1).build());
+            f.via(crashing).publish(event(FILES_REJECTED).count("files", 1).build());
         } catch (ProcessStopped expected) {
             // the process "stopped" while sending
         }

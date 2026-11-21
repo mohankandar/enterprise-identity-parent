@@ -12,6 +12,7 @@ classpath). platform-core is not a server, has no `main`, and is never deployed 
 | `platform-identity-spring` | Spring Security adapters for identity (JWT normalizer, audience validator, caching binding resolver). |
 | `platform-notifications` | Notifications (plain Java, no Spring): event catalogue, admin settings, routing, summaries, continuous-condition alerts, message content rule; outbox with retries; SMTP, Teams (Workflows webhook) and Slack senders; Postgres stores and SQL migrations (`db/platform/notifications`). Design: `docs/design/notifications.md`. |
 | `platform-notifications-testkit` | Test support for notifications: in-memory channel, recipient resolver, secret resolver and stores. Test scope only; never in production code. |
+| `platform-notifications-spring` | Spring Boot wiring for notifications: auto-configuration, `platform.notifications.*` properties (validated at startup), startup check of the `notif_` tables (never creates them), scheduled tick and background sender, health indicator per destination. Install guide: `docs/install/notifications.md`. |
 
 New capability = new module, added to the root `<modules>` list **and** to `platform-bom`.
 

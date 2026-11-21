@@ -45,32 +45,32 @@ class RoutingTest {
 
     @Test
     void enabledImmediateEventGoesByEmailToTheRoleHoldersOfItsEntity() {
-        List<DeliveryReport> reports = f.notifier.publish(approval(E1));
+        List<DeliveryReport> reports = f.via(f.notifier).publish(approval(E1));
         assertEquals(1, reports.size());
         assertEquals(DeliveryStatus.SENT, reports.get(0).status());
         assertEquals(MAIL, reports.get(0).destination());
         assertEquals(Set.of(CY), f.email.sent().get(0).recipients());
 
-        f.notifier.publish(approval(E2));
+        f.via(f.notifier).publish(approval(E2));
         assertEquals(Set.of(ANN), f.email.sent().get(1).recipients());
     }
 
     @Test
     void switchedOffEventIsNotSent() {
-        List<DeliveryReport> reports = f.notifier.publish(event(LEVEL_LOWERED).entity(E1).build());
+        List<DeliveryReport> reports = f.via(f.notifier).publish(event(LEVEL_LOWERED).entity(E1).build());
         assertEquals(DeliveryStatus.DISABLED, reports.get(0).status());
         assertTrue(f.email.sent().isEmpty());
 
         f.settings.setBusinessEvent(TENANT, E1, LEVEL_LOWERED, defaults(LEVEL_LOWERED).withEnabled(true));
-        assertEquals(DeliveryStatus.SENT, f.notifier.publish(event(LEVEL_LOWERED).entity(E1).build()).get(0).status());
-        assertEquals(DeliveryStatus.DISABLED, f.notifier.publish(event(LEVEL_LOWERED).entity(E2).build()).get(0).status());
+        assertEquals(DeliveryStatus.SENT, f.via(f.notifier).publish(event(LEVEL_LOWERED).entity(E1).build()).get(0).status());
+        assertEquals(DeliveryStatus.DISABLED, f.via(f.notifier).publish(event(LEVEL_LOWERED).entity(E2).build()).get(0).status());
     }
 
     @Test
     void webhooksPostToTheAssignedChannelWithoutRecipients() {
         f.settings.setTechnicalEvent(TENANT, FILES_REJECTED,
                 defaults(FILES_REJECTED).withSchedule(Schedule.immediately()).withDestinations(TEAMS, SLACK));
-        List<DeliveryReport> reports = f.notifier.publish(event(FILES_REJECTED).count("files", 2).build());
+        List<DeliveryReport> reports = f.via(f.notifier).publish(event(FILES_REJECTED).count("files", 2).build());
         assertEquals(List.of(SLACK, TEAMS), reports.stream().map(DeliveryReport::destination).toList());
         assertTrue(f.email.sent().isEmpty());
         assertEquals(1, f.teams.sent().size());
@@ -80,7 +80,7 @@ class RoutingTest {
 
     @Test
     void criticalEventGoesImmediatelyToTheItAdmin() {
-        f.notifier.publish(event(LICENCE_EXPIRED).entity(E1).build());
+        f.via(f.notifier).publish(event(LICENCE_EXPIRED).entity(E1).build());
         assertEquals(Set.of(ANN, CY), f.email.sent().get(0).recipients());
     }
 
@@ -88,12 +88,12 @@ class RoutingTest {
     void tenantWithoutChannelsHasNoDestination() {
         NotificationSettings bare = new NotificationSettings(Fixture.catalogue(), new InMemorySettingsStore());
         Notifier n = f.notifier(bare, f.resolver, List.of(f.email));
-        assertEquals(DeliveryStatus.NO_DESTINATION, n.publish(approval(E1)).get(0).status());
+        assertEquals(DeliveryStatus.NO_DESTINATION, f.via(n).publish(approval(E1)).get(0).status());
     }
 
     @Test
     void noOneHoldingTheRoleIsReportedNotSent() {
-        DeliveryReport r = f.notifier.publish(approval(EntityId.of("e-nobody"))).get(0);
+        DeliveryReport r = f.via(f.notifier).publish(approval(EntityId.of("e-nobody"))).get(0);
         assertEquals(DeliveryStatus.FAILED, r.status());
         assertEquals(FailureCode.NO_RECIPIENTS, r.failure());
     }
@@ -101,7 +101,7 @@ class RoutingTest {
     @Test
     void channelFailuresCarryTheirSpecificCode() {
         f.email.failWith(FailureCode.MAIL_LOGIN_REFUSED);
-        DeliveryReport r = f.notifier.publish(approval(E1)).get(0);
+        DeliveryReport r = f.via(f.notifier).publish(approval(E1)).get(0);
         assertEquals(DeliveryStatus.FAILED, r.status());
         assertEquals(FailureCode.MAIL_LOGIN_REFUSED, r.failure());
     }
@@ -109,7 +109,7 @@ class RoutingTest {
     @Test
     void missingSenderAndFaultySenderAreReported() {
         Notifier noEmail = f.notifier(f.settings, f.resolver, List.of(f.teams));
-        assertEquals(FailureCode.CHANNEL_NOT_AVAILABLE, noEmail.publish(approval(E1)).get(0).failure());
+        assertEquals(FailureCode.CHANNEL_NOT_AVAILABLE, f.via(noEmail).publish(approval(E1)).get(0).failure());
 
         Channel faulty = new Channel() {
             public ChannelKind kind() {
@@ -121,13 +121,13 @@ class RoutingTest {
             }
         };
         Notifier n = f.notifier(f.settings, f.resolver, List.of(faulty));
-        assertEquals(FailureCode.SENDER_FAILED, n.publish(approval(E1)).get(0).failure());
+        assertEquals(FailureCode.SENDER_FAILED, f.via(n).publish(approval(E1)).get(0).failure());
 
         RecipientResolver broken = (t, e, r) -> {
             throw new IllegalStateException("directory down");
         };
         Notifier n2 = f.notifier(f.settings, broken, List.of(new InMemoryChannel(ChannelKind.EMAIL)));
-        assertEquals(FailureCode.RECIPIENTS_UNAVAILABLE, n2.publish(approval(E1)).get(0).failure());
+        assertEquals(FailureCode.RECIPIENTS_UNAVAILABLE, f.via(n2).publish(approval(E1)).get(0).failure());
     }
 
     @Test
@@ -137,7 +137,7 @@ class RoutingTest {
         f.settings.connectChannels(TENANT, new TenantSettings(Fixture.tenantSettings(ZoneOffset.UTC).appBaseUrl(),
                 ZoneOffset.UTC, java.util.Map.of(MAIL, ChannelKind.EMAIL)));
         // the saved settings now name a destination that is gone, so the defaults apply: e-mail, every hour
-        List<DeliveryReport> reports = f.notifier.publish(event(FILES_REJECTED).build());
+        List<DeliveryReport> reports = f.via(f.notifier).publish(event(FILES_REJECTED).build());
         assertEquals(1, reports.size());
         assertEquals(MAIL, reports.get(0).destination());
         assertEquals(DeliveryStatus.QUEUED_FOR_SUMMARY, reports.get(0).status());
@@ -148,12 +148,12 @@ class RoutingTest {
     @Test
     void misuseOfThePublishApiIsRefused() {
         assertEquals(UNKNOWN_EVENT_TYPE, assertThrows(NotificationException.class,
-                () -> f.notifier.publish(event(EventTypeId.of("not.registered")).build())).reason());
+                () -> f.via(f.notifier).publish(event(EventTypeId.of("not.registered")).build())).reason());
         assertEquals(ENTITY_REQUIRED, assertThrows(NotificationException.class,
-                () -> f.notifier.publish(event(APPROVAL_WAITING).build())).reason());
+                () -> f.via(f.notifier).publish(event(APPROVAL_WAITING).build())).reason());
         assertEquals(IS_A_CONDITION, assertThrows(NotificationException.class,
-                () -> f.notifier.publish(event(STORE_DOWN).build())).reason());
+                () -> f.via(f.notifier).publish(event(STORE_DOWN).build())).reason());
         assertEquals(NOT_A_CONDITION, assertThrows(NotificationException.class,
-                () -> f.notifier.conditionFailing(event(FILES_REJECTED).build())).reason());
+                () -> f.via(f.notifier).conditionFailing(event(FILES_REJECTED).build())).reason());
     }
 }

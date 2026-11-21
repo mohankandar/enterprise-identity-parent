@@ -6,7 +6,7 @@ public enum DeliveryStatus {
     SENT,
     /** Held for the next summary. */
     QUEUED_FOR_SUMMARY,
-    /** Saved in the outbox and not sent yet: another worker is sending it. */
+    /** Saved in the outbox and not sent yet: the background sender delivers it ({@code Notifier.sendDue}). */
     PENDING,
     /** A temporary failure (see the failure code); saved in the outbox and tried again later. */
     RETRY_SCHEDULED,

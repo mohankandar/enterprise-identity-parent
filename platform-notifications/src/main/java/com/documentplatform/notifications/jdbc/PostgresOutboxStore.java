@@ -20,7 +20,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -97,11 +96,12 @@ public final class PostgresOutboxStore implements OutboxStore {
     public List<OutboxEntry> claimDue(Instant now, Instant leaseUntil, int limit) {
         return Sql.run(ds, "claim due outbox messages", c -> {
             try (PreparedStatement ps = c.prepareStatement("""
-                    update notif_outbox set state = 'SENDING', claimed_until = ?
+                    with claimed as (update notif_outbox set state = 'SENDING', claimed_until = ?
                     where message_key in (
                         select message_key from notif_outbox where %s
-                        order by next_attempt_at limit ? for update skip locked)
-                    returning *""".formatted(DUE))) {
+                        order by next_attempt_at, seq limit ? for update skip locked)
+                    returning *)
+                    select * from claimed order by next_attempt_at, seq""".formatted(DUE))) {
                 ps.setObject(1, ts(leaseUntil));
                 ps.setObject(2, ts(now));
                 ps.setObject(3, ts(now));
@@ -112,7 +112,6 @@ public final class PostgresOutboxStore implements OutboxStore {
                         out.add(entry(rs));
                     }
                 }
-                out.sort(Comparator.comparing(OutboxEntry::nextAttemptAt).thenComparing(OutboxEntry::key));
                 return out;
             }
         });
