@@ -3,12 +3,16 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <groupId>com.documentplatform.identity</groupId>
-    <artifactId>enterprise-identity-parent</artifactId>
-    <version>0.4.0-SNAPSHOT</version>
+    <artifactId>platform-core</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
+    <name>platform-core</name>
+    <description>Shared libraries for LexaVault and Vero: one module per capability, one version for all modules.</description>
     <modules>
-        <module>enterprise-identity-core</module>
-        <module>enterprise-identity-spring</module>
+        <module>platform-bom</module>
+        <module>platform-identity-core</module>
+        <module>platform-identity-spring</module>
+        <module>platform-notifications</module>
     </modules>
     <properties>
         <maven.compiler.release>21</maven.compiler.release>

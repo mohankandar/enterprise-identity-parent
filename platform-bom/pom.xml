@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.documentplatform.identity</groupId>
+        <artifactId>platform-core</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>platform-bom</artifactId>
+    <packaging>pom</packaging>
+    <description>Bill of materials: every platform-core module at the one platform version. Import it in dependencyManagement.</description>
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.documentplatform.identity</groupId>
+                <artifactId>platform-identity-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.documentplatform.identity</groupId>
+                <artifactId>platform-identity-spring</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.documentplatform.identity</groupId>
+                <artifactId>platform-notifications</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+</project>
