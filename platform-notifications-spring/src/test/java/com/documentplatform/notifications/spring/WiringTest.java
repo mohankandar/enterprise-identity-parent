@@ -86,7 +86,9 @@ class WiringTest {
             await(Duration.ofSeconds(10), "the e-mail", () -> mail.getReceivedMessages().length == 1);
             MimeMessage m = mail.getReceivedMessages()[0];
             assertEquals("Approval waiting: LN 1", m.getSubject());
-            assertEquals(1, db.count("select count(*) from notif_outbox where state = 'SENT'"));
+            // The mail server has the message a moment before the sender records it as sent.
+            await(Duration.ofSeconds(10), "the outbox row marked SENT",
+                    () -> db.count("select count(*) from notif_outbox where state = 'SENT'") == 1);
         });
     }
 

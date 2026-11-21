@@ -120,5 +120,58 @@ Listed so the model covers them. Kind: B = business, T = technical, C = critical
 12. **A summary whose event types were all removed** from the catalogue in a later release is dropped silently.
 13. **`WEBHOOK_REJECTED` reads "… refused the webhook request (not authorised)"**, matching 401/403.
 
-Decisions made in P005 (Spring wiring) are listed in `docs/work/P005-report.md` and await the owner's review before
-they are copied here.
+### Owner answers to the P005 questions (2026-11-21)
+
+- **B1. OAuth 2.0 (XOAUTH2) for Microsoft 365 / Google mail:** still open (P004 A2). Until it is decided, the
+  install guide points to a relay connector.
+- **B2. Health states accepted:** "Not used yet" is a fourth state, and the component status is `DEGRADED`, not
+  `DOWN`, when a destination has a problem.
+- **B3. Health stays per app instance** for now; cluster-wide health read from the outbox may be revisited if a
+  customer's monitoring needs one view.
+- **B4. Flyway: separate run, own history table.** Each app runs `db/platform/notifications` as a separate Flyway run
+  with its own history table `notif_schema_history`, in its schema step, never at app startup. The platform files
+  never share the app's history table (both start at V1). Each app's switch-over task records this.
+- **B5. One mail server for all e-mail destinations** is enough for V1. Per-destination servers can be added later
+  without breaking the config (`mail.*` stays the default).
+
+### Decisions made in P005, as confirmed or changed by the answers above
+
+1. **The core API changed for answer A3.** Added: `sendDue`, `queueDue`, `batchSize()` and `Builder.whenQueued`.
+   `publish` now reports `PENDING` where it used to report `SENT`. `tick` keeps its old meaning (queue, then send),
+   so plain-Java callers and the existing tests still work.
+2. **V1 was edited instead of adding V2**, for the version table and the outbox `seq` column. V1 was never released.
+   Once a release ships, its files are never edited again.
+3. **The version comes from `notif_schema_version`**, which the SQL files keep up to date, not from Flyway's history:
+   each app uses its own tool and history table (see B4).
+4. **Startup also checks the user's rights**, with `has_table_privilege`, so a missing grant is named at startup and
+   not at the first send. No sequence rights are needed.
+5. **One mail server serves every e-mail destination.** E-mail destination ids live in the tenant settings
+   (database), not in the config. Confirmed (B5).
+6. **Teams and Slack ids are config map keys**, unique across both channels. Ports default from the security
+   setting. Security defaults to STARTTLS.
+7. **Extra limits:** the lease must be longer than the longest send (connect + read timeout); otherwise a slow send
+   looks like a stopped one and is sent twice. `tick-interval` and `sender.poll-interval` must be 1 s – 5 min.
+   `sender.batch-size` must be 1 – 1000.
+8. **Validation is the module's own code, not Bean Validation**, to give one specific message per key and never echo
+   a possible secret.
+9. **The module runs its own daemon threads** and does not use `@EnableScheduling`, so it imposes nothing on the
+   app's scheduler. One tick thread and one sender thread per instance.
+10. **Several instances need no cluster lock.** Claims use `SKIP LOCKED`, and alerts and summaries raised twice get
+    the same key.
+11. **Shutdown waits up to 10 s for a send in progress.** A send cut off there is sent again after its lease: the same
+    accepted window as A1.
+12. **Health is per app instance and in memory**, from the last outcome per destination. Confirmed (B2, B3).
+    - A fourth state, **Not used yet**, covers the time before the first send.
+    - Temporary failures count as **Down** after 15 minutes without a success.
+    - Refusals that concern one message (recipient refused, message rejected, no recipients) count as **Having
+      problems**, because the destination itself answers.
+    - Configured Teams and Slack destinations are listed from the start. E-mail destinations appear once used.
+13. **The component status is `DEGRADED`, not `DOWN`**, when a destination has a problem, so a broken webhook does
+    not get the app restarted or taken out of a load balancer. Confirmed (B2).
+14. **Missing app beans give a specific startup message.** `SecretResolver` is required only when a channel is
+    configured. The table check runs only when the module's Postgres stores are used.
+15. **Built against Spring Boot 3.3.2**, the lowest line the products run; the suite also passes on 3.5.16.
+    `spring-boot-autoconfigure` is compile scope and `spring-boot-actuator` is optional. The app's own Boot version
+    wins.
+16. **New dependencies, all Apache-2.0:** `spring-boot-autoconfigure` (compile), `spring-boot-actuator` (optional),
+    and `spring-boot-test` and `assertj-core` (test). AssertJ's `byte-buddy` is excluded.
