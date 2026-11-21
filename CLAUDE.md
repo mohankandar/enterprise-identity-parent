@@ -36,6 +36,9 @@ Java 21, Maven 3.9+.
 - **Never log secrets, document content or redacted values.** That includes tokens, client secrets, keys,
   passwords, raw claims, file contents, and anything that was redacted. Log ids and neutral reasons only.
 - Keep Java package names stable; renames are their own task.
+- **Coordinates and packages.** Every module uses groupId `com.documentplatform.platform`. A new module puts its
+  code in `com.documentplatform.<capability>` (for example `com.documentplatform.notifications`). The identity
+  modules keep their existing `com.documentplatform.identity...` packages.
 
 ## Work tracking
 
