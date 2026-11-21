@@ -87,7 +87,7 @@ class RoutingTest {
     @Test
     void tenantWithoutChannelsHasNoDestination() {
         NotificationSettings bare = new NotificationSettings(Fixture.catalogue(), new InMemorySettingsStore());
-        Notifier n = new Notifier(bare, f.resolver, List.of(f.email), f.clock);
+        Notifier n = f.notifier(bare, f.resolver, List.of(f.email));
         assertEquals(DeliveryStatus.NO_DESTINATION, n.publish(approval(E1)).get(0).status());
     }
 
@@ -108,7 +108,7 @@ class RoutingTest {
 
     @Test
     void missingSenderAndFaultySenderAreReported() {
-        Notifier noEmail = new Notifier(f.settings, f.resolver, List.of(f.teams), f.clock);
+        Notifier noEmail = f.notifier(f.settings, f.resolver, List.of(f.teams));
         assertEquals(FailureCode.CHANNEL_NOT_AVAILABLE, noEmail.publish(approval(E1)).get(0).failure());
 
         Channel faulty = new Channel() {
@@ -120,13 +120,13 @@ class RoutingTest {
                 throw new IllegalStateException("smtp said: 535 secret-detail");
             }
         };
-        Notifier n = new Notifier(f.settings, f.resolver, List.of(faulty), f.clock);
+        Notifier n = f.notifier(f.settings, f.resolver, List.of(faulty));
         assertEquals(FailureCode.SENDER_FAILED, n.publish(approval(E1)).get(0).failure());
 
         RecipientResolver broken = (t, e, r) -> {
             throw new IllegalStateException("directory down");
         };
-        Notifier n2 = new Notifier(f.settings, broken, List.of(new InMemoryChannel(ChannelKind.EMAIL)), f.clock);
+        Notifier n2 = f.notifier(f.settings, broken, List.of(new InMemoryChannel(ChannelKind.EMAIL)));
         assertEquals(FailureCode.RECIPIENTS_UNAVAILABLE, n2.publish(approval(E1)).get(0).failure());
     }
 

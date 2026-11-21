@@ -1,8 +1,11 @@
 package com.documentplatform.notifications;
 
 import com.documentplatform.notifications.inmemory.InMemoryChannel;
+import com.documentplatform.notifications.inmemory.InMemoryConditionStore;
+import com.documentplatform.notifications.inmemory.InMemoryOutboxStore;
 import com.documentplatform.notifications.inmemory.InMemoryRecipientResolver;
 import com.documentplatform.notifications.inmemory.InMemorySettingsStore;
+import com.documentplatform.notifications.inmemory.InMemorySummaryStore;
 
 import java.net.URI;
 import java.time.Clock;
@@ -82,7 +85,16 @@ final class Fixture {
     final InMemoryChannel email = new InMemoryChannel(ChannelKind.EMAIL);
     final InMemoryChannel teams = new InMemoryChannel(ChannelKind.TEAMS);
     final InMemoryChannel slack = new InMemoryChannel(ChannelKind.SLACK);
-    final Notifier notifier = new Notifier(settings, resolver, List.of(email, teams, slack), clock);
+    final InMemoryOutboxStore outbox = new InMemoryOutboxStore();
+    final InMemorySummaryStore summaries = new InMemorySummaryStore();
+    final InMemoryConditionStore conditions = new InMemoryConditionStore();
+    final Notifier notifier = notifier(settings, resolver, List.of(email, teams, slack));
+
+    /** A notifier on this fixture's clock and stores, with other settings, resolver or channels. */
+    Notifier notifier(NotificationSettings settings, RecipientResolver resolver, List<? extends Channel> channels) {
+        return Notifier.builder(settings, resolver).channels(channels).clock(clock)
+                .outbox(outbox).summaries(summaries).conditions(conditions).build();
+    }
 
     Fixture() {
         this(ZoneOffset.UTC);

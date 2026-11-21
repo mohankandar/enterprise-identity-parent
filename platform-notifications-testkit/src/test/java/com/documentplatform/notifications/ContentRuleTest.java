@@ -49,9 +49,10 @@ class ContentRuleTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"contains a space", "line\nbreak", "password=hunter2", "user@example.test",
-            "https://hooks.example.test/x", "a?b", "a&b", "100%", "x+y", "", " leading",
-            "an-identifier-that-is-far-too-long-to-be-any-record-number-at-all-really"})
+    @ValueSource(strings = {"double  space", "line\nbreak", "password=hunter2", "user@example.test",
+            "https://hooks.example.test/x", "a?b", "a&b", "100%", "x+y", "", " leading", "trailing ", " ",
+            "tab\tinside", "an-identifier-that-is-far-too-long-to-be-any-record-number-at-all-really",
+            "an identifier that is far too long to be any record number at all"})
     void identifiersRefuseTextThatIsNotAnIdentifier(String value) {
         NotificationException e = assertThrows(NotificationException.class, () -> RecordIdentifier.of(value));
         assertEquals(INVALID_VALUE, e.reason());
@@ -62,7 +63,8 @@ class ContentRuleTest {
 
     @Test
     void identifiersAcceptRecordNumbers() {
-        for (String ok : new String[]{"C-1001", "2026/000123", "INV.77#3", "case:42"}) {
+        for (String ok : new String[]{"C-1001", "2026/000123", "INV.77#3", "case:42", "LN 12345", "A 1 B 2",
+                "x".repeat(64)}) {
             assertEquals(ok, RecordIdentifier.of(ok).value());
         }
     }

@@ -2,8 +2,9 @@ package com.documentplatform.notifications;
 
 /**
  * The record's primary identifier, such as a contract or case number: the only per-record text a message may carry.
- * At most 64 characters of letters, digits and {@code . _ : / # -}; no spaces, no {@code //}. This keeps sentences,
- * key=value pairs, e-mail addresses and URLs out, so a field value or a secret cannot be passed off as an identifier.
+ * At most 64 characters of letters, digits and {@code . _ : / # -}, with single spaces inside (for example
+ * {@code LN 12345}); no leading, trailing or double spaces, no {@code //}. This keeps key=value pairs, e-mail
+ * addresses and URLs out, so a field value or a secret cannot easily be passed off as an identifier.
  */
 public record RecordIdentifier(String value) {
 

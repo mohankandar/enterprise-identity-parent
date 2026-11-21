@@ -4,8 +4,8 @@ import java.util.Optional;
 
 /**
  * Where settings are kept. Stores hold what they are given; {@link NotificationSettings} checks the rules before it
- * saves and again when it reads. In-memory implementation: {@code inmemory.InMemorySettingsStore}; a database one
- * follows in P004.
+ * saves and again when it reads. Postgres implementation: {@code jdbc.PostgresSettingsStore}; an in-memory one for
+ * tests is in the testkit module.
  */
 public interface SettingsStore {
 

@@ -10,7 +10,8 @@ classpath). platform-core is not a server, has no `main`, and is never deployed 
 | `platform-bom` | Bill of materials. Lists every platform module at the platform version. Products import it in `dependencyManagement`. |
 | `platform-identity-core` | Identity: claims, OIDC connection bindings, entity admission, role mapping. No framework dependencies. |
 | `platform-identity-spring` | Spring Security adapters for identity (JWT normalizer, audience validator, caching binding resolver). |
-| `platform-notifications` | Notifications core (plain Java, no I/O): event catalogue, admin settings, routing, summaries, continuous-condition alerts, message content rule. Design: `docs/design/notifications.md`. |
+| `platform-notifications` | Notifications (plain Java, no Spring): event catalogue, admin settings, routing, summaries, continuous-condition alerts, message content rule; outbox with retries; SMTP, Teams (Workflows webhook) and Slack senders; Postgres stores and SQL migrations (`db/platform/notifications`). Design: `docs/design/notifications.md`. |
+| `platform-notifications-testkit` | Test support for notifications: in-memory channel, recipient resolver, secret resolver and stores. Test scope only; never in production code. |
 
 New capability = new module, added to the root `<modules>` list **and** to `platform-bom`.
 

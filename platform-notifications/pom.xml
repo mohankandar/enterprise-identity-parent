@@ -7,12 +7,45 @@
         <version>0.1.0-SNAPSHOT</version>
     </parent>
     <artifactId>platform-notifications</artifactId>
-    <description>Notifications capability: event catalogue, settings, routing, summaries and continuous-condition alerts. Plain Java, no I/O.</description>
+    <description>Notifications capability: event catalogue, settings, routing, summaries, continuous-condition alerts,
+        an outbox with retries, SMTP / Teams / Slack senders and Postgres storage. Plain Java, no Spring.</description>
     <dependencies>
+        <!-- SMTP sender. Jakarta Mail API + Eclipse Angus implementation (same line Spring Boot 3 uses). -->
+        <dependency>
+            <groupId>org.eclipse.angus</groupId>
+            <artifactId>angus-mail</artifactId>
+            <version>${angus.mail.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>5.10.3</version>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.icegreen</groupId>
+            <artifactId>greenmail</artifactId>
+            <version>${greenmail.version}</version>
+            <scope>test</scope>
+            <exclusions>
+                <!-- GreenMail brings the all-in-one Angus jar; we already have angus-mail + jakarta.mail-api. -->
+                <exclusion>
+                    <groupId>org.eclipse.angus</groupId>
+                    <artifactId>jakarta.mail</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${postgresql.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

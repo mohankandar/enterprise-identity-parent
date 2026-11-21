@@ -12,8 +12,12 @@ final class Text {
     /** Ids: tenant, entity, event type, role, destination. */
     static final Pattern ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
 
-    /** A record's primary identifier, such as a contract number. No spaces, no '=', '@', '?', '&', '%', '+'. */
-    static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:/#-]{0,63}");
+    /**
+     * A record's primary identifier, such as a contract number: at most 64 characters, single spaces inside only (no
+     * leading, trailing or double spaces), no '=', '@', '?', '&', '%', '+'.
+     */
+    static final Pattern IDENTIFIER =
+            Pattern.compile("(?=.{1,64}\\z)[A-Za-z0-9][A-Za-z0-9._:/#-]*(?: [A-Za-z0-9._:/#-]+)*");
 
     /** Event names and field labels, fixed by the app's catalogue. One line, no markup characters. */
     static final Pattern LABEL = Pattern.compile("[\\p{L}\\p{N}][\\p{L}\\p{N} ().,'/%&-]{0,79}");

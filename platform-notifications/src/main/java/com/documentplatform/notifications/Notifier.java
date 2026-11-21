@@ -1,7 +1,10 @@
 package com.documentplatform.notifications;
 
+import java.lang.System.Logger.Level;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumMap;
@@ -19,35 +22,60 @@ import static com.documentplatform.notifications.NotificationException.Reason.UN
 
 /**
  * The entry point. Apps publish events and report conditions; the app's scheduler calls {@link #tick(Instant)}
- * regularly (every minute is enough) to raise condition alerts and send summaries that are due.
+ * regularly (every minute is enough) to raise condition alerts, send summaries that are due and retry messages that
+ * failed for a temporary reason.
  *
  * <p>Routing, for each event: is the event type switched on for this tenant (technical) or entity (business)? →
  * which connected destinations does it go to? → for e-mail, which people hold its recipient roles (asked of the app's
  * {@link RecipientResolver} at send time)? Immediately events are sent at once; the others wait for their summary.
  *
- * <p>Thread-safe: calls are serialised. State (summary buckets, conditions) is in memory in P003.
+ * <p>Reliability: every message is saved in the {@link OutboxStore} before it is sent, under an idempotency key that
+ * names what the message is. A restart loses nothing (saved messages are sent on the next tick) and re-creating a
+ * message gives the saved one, not a second. Temporary failures are retried with backoff ({@link RetryPolicy});
+ * permanent ones stop at once and are reported. Summary buckets and condition state are stored too.
+ *
+ * <p>Logs ids, codes and fixed reasons only (to the {@code System.Logger} of this class), never message content,
+ * addresses or secrets. Thread-safe: calls are serialised per instance; several instances may share the stores.
  */
 public final class Notifier {
+
+    private static final System.Logger LOG = System.getLogger(Notifier.class.getName());
 
     private final NotificationSettings settings;
     private final EventCatalogue catalogue;
     private final RecipientResolver recipients;
-    private final Map<ChannelKind, Channel> channels = new EnumMap<>(ChannelKind.class);
+    private final Map<ChannelKind, Channel> channels;
     private final Clock clock;
-    private final SummaryBuckets buckets = new SummaryBuckets();
-    private final ConditionTracker conditions = new ConditionTracker();
+    private final OutboxStore outbox;
+    private final SummaryBuckets buckets;
+    private final ConditionTracker conditions;
+    private final RetryPolicy retry;
+    private final Duration lease;
+    private final Duration keepFinishedFor;
+    private final int batchSize;
 
-    public Notifier(NotificationSettings settings, RecipientResolver recipients, Collection<? extends Channel> channels,
-                    Clock clock) {
-        this.settings = Objects.requireNonNull(settings, "settings");
+    private Notifier(Builder b) {
+        this.settings = Objects.requireNonNull(b.settings, "settings");
         this.catalogue = settings.catalogue();
-        this.recipients = Objects.requireNonNull(recipients, "recipients");
-        channels.forEach(c -> {
+        this.recipients = Objects.requireNonNull(b.recipients, "recipients");
+        this.channels = new EnumMap<>(ChannelKind.class);
+        b.channels.forEach(c -> {
             if (this.channels.put(c.kind(), c) != null) {
                 throw new IllegalArgumentException("One channel per kind");
             }
         });
-        this.clock = Objects.requireNonNull(clock, "clock");
+        this.clock = Objects.requireNonNull(b.clock, "clock");
+        this.outbox = Objects.requireNonNull(b.outbox, "outbox store");
+        this.buckets = new SummaryBuckets(Objects.requireNonNull(b.summaries, "summary store"));
+        this.conditions = new ConditionTracker(Objects.requireNonNull(b.conditions, "condition store"), catalogue);
+        this.retry = Objects.requireNonNull(b.retry, "retry policy");
+        this.lease = b.lease;
+        this.keepFinishedFor = b.keepFinishedFor;
+        this.batchSize = b.batchSize;
+    }
+
+    public static Builder builder(NotificationSettings settings, RecipientResolver recipients) {
+        return new Builder(settings, recipients);
     }
 
     /** Publishes a one-off event. Returns what happened for each destination. */
@@ -56,9 +84,9 @@ public final class Notifier {
         if (type.continuous()) {
             throw new NotificationException(IS_A_CONDITION, "Continuous event types are reported as conditions");
         }
-        Instant now = clock.instant();
+        Instant now = now();
         Instant at = event.occurredAt() == null ? now : event.occurredAt();
-        return route(new Occurrence(event, type, MessageKind.EVENT, at, null, 0), now);
+        return route(new Occurrence(Keys.newEvent(), event, type, MessageKind.EVENT, at, null, 0), now);
     }
 
     /**
@@ -70,23 +98,37 @@ public final class Notifier {
         if (!type.continuous()) {
             throw new NotificationException(NOT_A_CONDITION, "Only continuous event types are reported as conditions");
         }
-        Instant now = clock.instant();
-        conditions.failing(event, type, now);
-        return routeAll(conditions.evaluate(now, this::timing), now);
+        Instant now = now();
+        conditions.failing(event, now);
+        return raiseDueAlerts(now);
     }
 
     /** Reports that a condition has cleared. Sends Recovered once, and only if the condition had alerted. */
     public synchronized List<DeliveryReport> conditionCleared(ConditionKey key) {
-        Instant now = clock.instant();
-        return conditions.cleared(key, now).map(o -> route(o, now)).orElse(List.of());
+        Instant now = now();
+        Optional<Occurrence> recovered = conditions.recovered(key, now);
+        if (recovered.isEmpty()) {
+            return List.of();
+        }
+        List<DeliveryReport> reports = route(recovered.get(), now);
+        conditions.remove(key);
+        return reports;
     }
 
-    /** Raises due condition alerts and sends due summaries. Called by the app's scheduler. */
+    /**
+     * Raises due condition alerts, sends due summaries, retries due messages (including any a stopped process left
+     * behind) and clears out finished messages older than the retention. Called by the app's scheduler.
+     */
     public synchronized List<DeliveryReport> tick(Instant now) {
-        List<DeliveryReport> reports = new ArrayList<>(routeAll(conditions.evaluate(now, this::timing), now));
-        for (SummaryBuckets.Due due : buckets.takeDue(now)) {
-            reports.add(sendSummary(due));
+        now = now.truncatedTo(ChronoUnit.MILLIS);
+        List<DeliveryReport> reports = new ArrayList<>(raiseDueAlerts(now));
+        for (SummaryBuckets.Due due : buckets.due(now)) {
+            reports.addAll(sendSummary(due, now));
         }
+        for (OutboxEntry entry : outbox.claimDue(now, now.plus(lease), batchSize)) {
+            reports.add(attempt(entry, now));
+        }
+        outbox.purgeFinishedBefore(now.minus(keepFinishedFor));
         return reports;
     }
 
@@ -98,6 +140,10 @@ public final class Notifier {
     /** Occurrences waiting for a summary. */
     public synchronized int pendingSummaryItems() {
         return buckets.pending();
+    }
+
+    private Instant now() {
+        return clock.instant().truncatedTo(ChronoUnit.MILLIS);
     }
 
     private EventType check(NotificationEvent event) {
@@ -120,9 +166,12 @@ public final class Notifier {
         return settings.effective(event.tenant(), event.entity(), event.type()).conditionTiming();
     }
 
-    private List<DeliveryReport> routeAll(List<Occurrence> occurrences, Instant now) {
+    private List<DeliveryReport> raiseDueAlerts(Instant now) {
         List<DeliveryReport> reports = new ArrayList<>();
-        occurrences.forEach(o -> reports.addAll(route(o, now)));
+        for (ConditionTracker.Due due : conditions.due(now, this::timing)) {
+            reports.addAll(route(due.occurrence(), now));
+            conditions.markAlerted(due, now);
+        }
         return reports;
     }
 
@@ -144,65 +193,227 @@ public final class Notifier {
             ChannelKind kind = t.kindOf(destination);
             Set<RoleId> roles = kind == ChannelKind.EMAIL ? s.recipientRoles() : Set.of();
             if (s.schedule().isSummary()) {
-                buckets.add(new SummaryBuckets.Key(e.tenant(), destination, s.schedule(), e.entity(), roles), o, now,
-                        t.zone());
+                buckets.add(e.tenant(), destination, s.schedule(), e.entity(), roles, o, now, t.zone());
                 reports.add(new DeliveryReport(e.tenant(), types, destination, o.kind(),
                         DeliveryStatus.QUEUED_FOR_SUMMARY, null));
             } else {
-                reports.add(deliver(e.tenant(), destination, kind, e.entity(), roles,
-                        MessageBuilder.single(o, t), types));
+                reports.add(enqueueAndSend(OutboxEntry.pending(Keys.forDestination(o.key(), destination), e.tenant(),
+                        destination, kind, e.entity(), roles, types, MessageBuilder.single(o, t), now), now));
             }
         }
         return reports;
     }
 
-    private DeliveryReport sendSummary(SummaryBuckets.Due due) {
-        SummaryBuckets.Key key = due.key();
+    private List<DeliveryReport> sendSummary(SummaryBuckets.Due due, Instant now) {
+        SummaryBucket bucket = due.bucket();
         Set<EventTypeId> types = new LinkedHashSet<>();
-        due.items().forEach(o -> types.add(o.type().id()));
-        Optional<TenantSettings> tenant = settings.tenant(key.tenant());
-        if (tenant.isEmpty() || !tenant.get().isConnected(key.destination())) {
-            return new DeliveryReport(key.tenant(), types, key.destination(), MessageKind.SUMMARY,
-                    DeliveryStatus.FAILED, FailureCode.DESTINATION_NOT_CONNECTED);
+        List<Occurrence> items = new ArrayList<>();
+        for (SummaryItem item : due.items()) {
+            // A type removed from the catalogue in a later release has nothing left to say.
+            catalogue.find(item.event().type()).ifPresent(type -> {
+                types.add(type.id());
+                items.add(new Occurrence(item.key(), item.event(), type, item.kind(), item.at(), item.since(),
+                        item.failures()));
+            });
+        }
+        if (items.isEmpty()) {
+            buckets.remove(due);
+            return List.of();
+        }
+        Optional<TenantSettings> tenant = settings.tenant(bucket.tenant());
+        if (tenant.isEmpty() || !tenant.get().isConnected(bucket.destination())) {
+            buckets.remove(due);
+            return List.of(failedReport(bucket.tenant(), types, bucket.destination(), null, MessageKind.SUMMARY,
+                    FailureCode.DESTINATION_NOT_CONNECTED, "summary dropped"));
         }
         TenantSettings t = tenant.get();
-        return deliver(key.tenant(), key.destination(), t.kindOf(key.destination()), key.entity(), key.roles(),
-                MessageBuilder.summary(due.items(), t), types);
+        OutboxEntry entry = OutboxEntry.pending(Keys.summary(bucket), bucket.tenant(), bucket.destination(),
+                t.kindOf(bucket.destination()), bucket.entity(), bucket.roles(), types,
+                MessageBuilder.summary(items, t), now);
+        // Saved first, then the bucket emptied: stopping in between rebuilds the same summary under the same key.
+        outbox.enqueue(entry);
+        buckets.remove(due);
+        return List.of(claimAndSend(entry, now));
     }
 
-    private DeliveryReport deliver(TenantId tenant, DestinationId destination, ChannelKind kind, EntityId entity,
-                                   Set<RoleId> roles, Message message, Set<EventTypeId> types) {
-        Channel channel = channels.get(kind);
+    private DeliveryReport enqueueAndSend(OutboxEntry entry, Instant now) {
+        outbox.enqueue(entry);
+        return claimAndSend(entry, now);
+    }
+
+    private DeliveryReport claimAndSend(OutboxEntry entry, Instant now) {
+        Optional<OutboxEntry> claimed = outbox.claim(entry.key(), now, now.plus(lease));
+        if (claimed.isPresent()) {
+            return attempt(claimed.get(), now);
+        }
+        // Already saved before (re-created after a restart) and sent, given up, or in another worker's hands.
+        OutboxEntry saved = outbox.find(entry.key()).orElse(entry);
+        DeliveryStatus status = switch (saved.state()) {
+            case SENT -> DeliveryStatus.SENT;
+            case FAILED -> DeliveryStatus.FAILED;
+            case PENDING, SENDING -> saved.lastFailure() == null ? DeliveryStatus.PENDING : DeliveryStatus.RETRY_SCHEDULED;
+        };
+        FailureCode code = status == DeliveryStatus.FAILED || status == DeliveryStatus.RETRY_SCHEDULED
+                ? saved.lastFailure() : null;
+        return new DeliveryReport(saved.tenant(), saved.eventTypes(), saved.destination(), saved.message().kind(),
+                status, code);
+    }
+
+    /** One attempt at a claimed message, and its outcome recorded in the outbox. */
+    private DeliveryReport attempt(OutboxEntry entry, Instant now) {
+        int attempts = entry.attempts() + 1;
+        SendResult result = send(entry);
+        MessageKind kind = entry.message().kind();
+        if (result.sent()) {
+            outbox.markSent(entry.key(), attempts, now);
+            LOG.log(Level.DEBUG, "Notification {0} sent to destination {1} of tenant {2}, attempt {3}",
+                    entry.key(), entry.destination(), entry.tenant(), attempts);
+            return new DeliveryReport(entry.tenant(), entry.eventTypes(), entry.destination(), kind,
+                    DeliveryStatus.SENT, null);
+        }
+        FailureCode code = result.failure();
+        Optional<Instant> next = code.retryable()
+                ? retry.next(entry.createdAt(), attempts, result.retryAfter(), now) : Optional.empty();
+        if (next.isPresent()) {
+            outbox.markRetry(entry.key(), attempts, next.get(), code);
+            LOG.log(Level.INFO, "Notification {0} to destination {1} of tenant {2} not delivered: {3} ({4}); "
+                            + "attempt {5}, next attempt at {6}", entry.key(), entry.destination(), entry.tenant(),
+                    code.describe(entry.channel()), code.name(), attempts, next.get());
+            return new DeliveryReport(entry.tenant(), entry.eventTypes(), entry.destination(), kind,
+                    DeliveryStatus.RETRY_SCHEDULED, code);
+        }
+        outbox.markFailed(entry.key(), attempts, code, now);
+        return failedReport(entry.tenant(), entry.eventTypes(), entry.destination(), entry.channel(), kind, code,
+                "notification " + entry.key()
+                        + (code.retryable() ? ", retries ran out after attempt " : ", stopped at attempt ") + attempts);
+    }
+
+    /** @param channel the destination's channel, or null when the destination is gone */
+    private static DeliveryReport failedReport(TenantId tenant, Set<EventTypeId> types, DestinationId destination,
+                                               ChannelKind channel, MessageKind kind, FailureCode code, String what) {
+        LOG.log(Level.WARNING, "Notification not delivered to destination {0} of tenant {1}: {2} ({3}); {4}",
+                destination, tenant, channel == null ? code.name() : code.describe(channel), code.name(), what);
+        return new DeliveryReport(tenant, types, destination, kind, DeliveryStatus.FAILED, code);
+    }
+
+    private SendResult send(OutboxEntry entry) {
+        Optional<TenantSettings> tenant = settings.tenant(entry.tenant());
+        if (tenant.isEmpty() || tenant.get().kindOf(entry.destination()) != entry.channel()) {
+            return SendResult.failed(FailureCode.DESTINATION_NOT_CONNECTED);
+        }
+        Channel channel = channels.get(entry.channel());
         if (channel == null) {
-            return failed(tenant, types, destination, message, FailureCode.CHANNEL_NOT_AVAILABLE);
+            return SendResult.failed(FailureCode.CHANNEL_NOT_AVAILABLE);
         }
         Set<Recipient> people = new LinkedHashSet<>();
-        if (kind == ChannelKind.EMAIL) {
+        if (entry.channel() == ChannelKind.EMAIL) {
             try {
                 // The IT Admin is a tenant-level role: asked without the entity, even for a per-entity event.
-                roles.forEach(role -> people.addAll(recipients.resolve(tenant,
-                        role.equals(catalogue.itAdminRole()) ? null : entity, role)));
+                entry.recipientRoles().stream().sorted((a, b) -> a.value().compareTo(b.value()))
+                        .forEach(role -> people.addAll(recipients.resolve(entry.tenant(),
+                                role.equals(catalogue.itAdminRole()) ? null : entry.entity(), role)));
             } catch (RuntimeException lookupFailed) {
-                return failed(tenant, types, destination, message, FailureCode.RECIPIENTS_UNAVAILABLE);
+                return SendResult.failed(FailureCode.RECIPIENTS_UNAVAILABLE);
             }
             if (people.isEmpty()) {
-                return failed(tenant, types, destination, message, FailureCode.NO_RECIPIENTS);
+                return SendResult.failed(FailureCode.NO_RECIPIENTS);
             }
         }
-        SendResult result;
         try {
-            result = channel.send(new OutgoingMessage(tenant, destination, kind, people, message));
+            return channel.send(new OutgoingMessage(entry.tenant(), entry.destination(), entry.channel(), people,
+                    entry.message(), entry.key()));
         } catch (RuntimeException senderFault) {
             // The exception text may hold a server reply or an address: it is not kept.
-            result = SendResult.failed(FailureCode.SENDER_FAILED);
+            return SendResult.failed(FailureCode.SENDER_FAILED);
         }
-        return result.sent()
-                ? new DeliveryReport(tenant, types, destination, message.kind(), DeliveryStatus.SENT, null)
-                : failed(tenant, types, destination, message, result.failure());
     }
 
-    private static DeliveryReport failed(TenantId tenant, Set<EventTypeId> types, DestinationId destination,
-                                         Message message, FailureCode code) {
-        return new DeliveryReport(tenant, types, destination, message.kind(), DeliveryStatus.FAILED, code);
+    /** Wires a notifier. Settings, recipients and the three stores are required. */
+    public static final class Builder {
+        private final NotificationSettings settings;
+        private final RecipientResolver recipients;
+        private final List<Channel> channels = new ArrayList<>();
+        private Clock clock = Clock.systemUTC();
+        private OutboxStore outbox;
+        private SummaryStore summaries;
+        private ConditionStore conditions;
+        private RetryPolicy retry = RetryPolicy.DEFAULT;
+        private Duration lease = Duration.ofMinutes(5);
+        private Duration keepFinishedFor = Duration.ofDays(30);
+        private int batchSize = 100;
+
+        private Builder(NotificationSettings settings, RecipientResolver recipients) {
+            this.settings = settings;
+            this.recipients = recipients;
+        }
+
+        public Builder channels(Collection<? extends Channel> channels) {
+            this.channels.addAll(channels);
+            return this;
+        }
+
+        public Builder channel(Channel channel) {
+            this.channels.add(Objects.requireNonNull(channel, "channel"));
+            return this;
+        }
+
+        public Builder clock(Clock clock) {
+            this.clock = clock;
+            return this;
+        }
+
+        public Builder outbox(OutboxStore outbox) {
+            this.outbox = outbox;
+            return this;
+        }
+
+        public Builder summaries(SummaryStore summaries) {
+            this.summaries = summaries;
+            return this;
+        }
+
+        public Builder conditions(ConditionStore conditions) {
+            this.conditions = conditions;
+            return this;
+        }
+
+        public Builder retryPolicy(RetryPolicy retry) {
+            this.retry = retry;
+            return this;
+        }
+
+        /**
+         * How long a worker holds a message it is sending (default 5 minutes). Must be longer than a channel's
+         * timeouts: a lease that runs out means the worker stopped, and the message is sent again.
+         */
+        public Builder lease(Duration lease) {
+            if (lease.compareTo(Duration.ofSeconds(1)) < 0) {
+                throw new IllegalArgumentException("The lease must be at least a second");
+            }
+            this.lease = lease;
+            return this;
+        }
+
+        /** How long sent and failed messages stay in the outbox (default 30 days). */
+        public Builder keepFinishedFor(Duration keepFinishedFor) {
+            if (keepFinishedFor.isNegative()) {
+                throw new IllegalArgumentException("Retention cannot be negative");
+            }
+            this.keepFinishedFor = keepFinishedFor;
+            return this;
+        }
+
+        /** Messages retried per tick (default 100). */
+        public Builder batchSize(int batchSize) {
+            if (batchSize < 1) {
+                throw new IllegalArgumentException("Batch size must be positive");
+            }
+            this.batchSize = batchSize;
+            return this;
+        }
+
+        public Notifier build() {
+            return new Notifier(this);
+        }
     }
 }
