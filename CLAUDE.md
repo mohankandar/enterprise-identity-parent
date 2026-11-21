@@ -30,6 +30,9 @@ mvn install     # also puts the artifacts in the local Maven repo for LexaVault 
 
 Java 21, Maven 3.9+.
 
+On the owner's Windows laptop, Norton 360 intercepts TLS; Maven trusts it via the user environment variable
+`MAVEN_OPTS=-Djavax.net.ssl.trustStoreType=Windows-ROOT`. Never add machine-specific settings to the repo.
+
 ## Rules
 
 - **No app-specific code here.** Nothing that belongs to only LexaVault or only Vero: no product names, product
